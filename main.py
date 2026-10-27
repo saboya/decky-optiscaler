@@ -84,8 +84,8 @@ class Plugin:
     async def get_fsr4_lite(self, target_dir: str) -> dict:
         return await self.service.get_fsr4_lite(target_dir)
 
-    async def enable_fsr4_lite(self, target_dir: str) -> dict:
-        return await self.service.enable_fsr4_lite(target_dir)
+    async def enable_fsr4_lite(self, target_dir: str, vulkan: bool = True) -> dict:
+        return await self.service.enable_fsr4_lite(target_dir, vulkan)
 
     async def disable_fsr4_lite(self, target_dir: str) -> dict:
         return await self.service.disable_fsr4_lite(target_dir)

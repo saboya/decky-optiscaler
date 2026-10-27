@@ -8,19 +8,46 @@ commit `b19cfd29`) because 0.9.4 has no setting for the Lite model.
 
 ## What the option does
 
-- Fetches AMD's `amdxcffx64.dll` (FidelityFX 2.4.0.4370, FSR 4.1.2) from AMD's
-  Adrenalin 26.10.1 installer. Only the ~43 MB stretch of the installer that
-  holds the DLL is downloaded, decoded locally and checked against a pinned
-  SHA-256. Nothing from AMD is bundled with the plugin. The first use accepts
-  the AMD Software EULA on your behalf.
-- Puts the DLL in the game's `OptiScaler/` folder, where OptiScaler 10.x looks
-  for it, and writes `Fsr4GpuSupport=4`, `Fsr4Model=3` (INT8 Lite),
-  `UpscalerIndex=0`, `Fsr4EnableWatermark=true` and the `ffx` / `ffx_12` backends.
-- The DLL, the INI and the manifest are written as one unit and rolled back
+- Fetches AMD's FSR 4.1.2 libraries from AMD's Adrenalin 26.10.1 installer: 
+  `amdxcffx64.dll` (DirectX, ~43 MB download) and `amdvkffx64.dll` (Vulkan,
+  ~30 MB). Only the stretch of the installer that holds each DLL is downloaded,
+  decoded locally and checked against a pinned SHA-256. Nothing from AMD is
+  bundled with the plugin. The first use accepts the AMD Software EULA on your
+  behalf. Both contain the `FSR4Lite_Int8` provider.
+- Puts them in the game's `OptiScaler/` folder, where OptiScaler 10.x looks for
+  them, and writes `Fsr4GpuSupport=4`, `Fsr4Model=3` (INT8 Lite),
+  `UpscalerIndex=0`, `Fsr4EnableWatermark=true`, and the `ffx` / `ffx_12`
+  backends: DX12 uses `ffx`, DX11 uses `ffx_12`, and native Vulkan uses `ffx`.
+- The DLLs, the INI and the manifest are written as one unit and rolled back
   together if any step fails. It refuses while the game is running.
 
 The download recipe is adapted from
-[FSR4Injector](https://github.com/Rayekkk/FSR4Injector) (BSD-3-Clause).
+[FSR4Injector](https://github.com/Rayekkk/FSR4Injector) (BSD-3-Clause). The
+Vulkan recipe is this plugin's own: it is the same 7z block, 47.8 MB before the
+Vulkan DLL, and the decoded file's CRC32 matches the one the archive records.
+
+## Vulkan
+
+Native Vulkan games differ from DirectX ones in ways that matter here:
+
+- OptiScaler keeps a **separate FFX version list for Vulkan**, and it is the one
+  that includes the driver's FSR 4 (where INT8 Lite lives). The ASI now reads
+  the list that matches `State::api`, and re-reads it if the game's API turns
+  out to be different from what it first saw.
+- The Vulkan list *appends* the driver's FSR 4 after the SDK's versions, so
+  `UpscalerIndex=0` is not necessarily it. The right index is only known once
+  the game has queried the list; the panel's FSR version picker shows what the
+  game reports.
+- **No frame rate for native Vulkan.** OptiScaler counts frames in its DXGI
+  swapchain wrapper, so with no DXGI swapchain `frameCount` never moves and the
+  frame rate reads as unavailable. DXVK and vkd3d-proton games present through
+  DXGI and are counted. That is OptiScaler's behaviour, not something this
+  plugin can fix.
+
+**Not verified:** that `VulkanUpscaler=ffx` is what makes a Vulkan game load
+`amdvkffx64.dll`. The source says the FFX Vulkan backend initialises the driver
+provider (`FSR4DriverProviderVk`) and looks the DLL up in `OptiDllPath` first, so
+it should; nothing has been run.
 
 ## Verification
 
@@ -48,7 +75,8 @@ the headers and cross-checked against the memory accesses in the shipped
 fails closed, so a layout that does not match leaves the feature reporting
 unavailable rather than writing anywhere. Two limits:
 
-- Only the DX12 FFX version list is read; Vulkan games report none.
+- The FFX version list that is read follows the game's graphics API (DX12 or
+  Vulkan); DX11 games use the DX12 list.
 - `std::mutex` (80 bytes) and `std::deque` (40 bytes) are MSVC internals that the
   headers do not give, so those sizes come from the binary.
 

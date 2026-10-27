@@ -311,6 +311,23 @@ class LiteFetchTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), self.payload)
 
 
+class LiteRecipeTests(unittest.TestCase):
+    def test_both_recipes_are_complete_and_distinct(self):
+        from optiscaler import fsr4lite
+        keys = {'id', 'api', 'driver', 'fsr', 'file', 'url', 'referer', 'packed_offset',
+                'unpacked_offset', 'dll_offset', 'dll_size', 'sha256'}
+        for api, recipe in fsr4lite.RECIPES.items():
+            self.assertTrue(keys <= set(recipe), api)
+            self.assertEqual(recipe['api'], api)
+            self.assertEqual(len(recipe['sha256']), 64)
+        self.assertNotEqual(fsr4lite.RECIPE['id'], fsr4lite.RECIPE_VULKAN['id'])
+        self.assertNotEqual(fsr4lite.RECIPE['file'], fsr4lite.RECIPE_VULKAN['file'])
+        self.assertEqual(fsr4lite.RECIPE['url'], fsr4lite.RECIPE_VULKAN['url'])
+        # The cache keeps one folder per recipe, so one never overwrites the other.
+        self.assertNotEqual(fsr4lite.cached_path('/c', fsr4lite.RECIPE),
+                            fsr4lite.cached_path('/c', fsr4lite.RECIPE_VULKAN))
+
+
 class LiteInstallTests(DeckFsr4Tests):
     """Choosing Lite: DLL, settings and manifest are one atomic unit."""
 
@@ -320,13 +337,26 @@ class LiteInstallTests(DeckFsr4Tests):
         self.fsr4lite = fsr4lite
         self.lite = self.root / 'amdxcffx64.dll'
         self.lite.write_bytes(b'stand-in for AMD DLL')
+        self.lite_vk = self.root / 'amdvkffx64.dll'
+        self.lite_vk.write_bytes(b'stand-in for AMD Vulkan DLL')
         self.recipe = dict(fsr4lite.RECIPE, dll_size=self.lite.stat().st_size,
                            sha256=hashlib.sha256(self.lite.read_bytes()).hexdigest())
+        self.recipe_vk = dict(fsr4lite.RECIPE_VULKAN, dll_size=self.lite_vk.stat().st_size,
+                              sha256=hashlib.sha256(self.lite_vk.read_bytes()).hexdigest())
+        standins = {'dx12': self.lite, 'vulkan': self.lite_vk}
+
+        def fake_ensure(cache, recipe=None, *a, **k):
+            return standins[(recipe or self.recipe)['api']]
+
+        def fake_valid(path, recipe=None):
+            expected = standins[(recipe or self.recipe)['api']]
+            return Path(path).is_file() and Path(path).read_bytes() == expected.read_bytes()
+
         for patcher in (patch.object(fsr4lite, 'RECIPE', self.recipe),
-                        patch.object(fsr4lite, 'ensure', lambda *a, **k: self.lite),
-                        patch.object(fsr4lite, 'is_valid',
-                                     lambda path, recipe=None: Path(path).is_file()
-                                     and Path(path).read_bytes() == self.lite.read_bytes())):
+                        patch.object(fsr4lite, 'RECIPE_VULKAN', self.recipe_vk),
+                        patch.object(fsr4lite, 'RECIPES', {'dx12': self.recipe, 'vulkan': self.recipe_vk}),
+                        patch.object(fsr4lite, 'ensure', fake_ensure),
+                        patch.object(fsr4lite, 'is_valid', fake_valid)):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -348,6 +378,54 @@ class LiteInstallTests(DeckFsr4Tests):
         self.assertIn('OptiScaler/amdxcffx64.dll', manifest['files'])
         self.assertTrue(manifest['fsr4_lite'])
         self.assertTrue(installer.lite_status(self.target)['valid'])
+
+    def test_enable_also_installs_the_vulkan_library_and_selects_ffx_for_vulkan(self):
+        self.assertTrue(self.enable_lite()['ok'])
+        vk = self.target / 'OptiScaler' / 'amdvkffx64.dll'
+        self.assertEqual(vk.read_bytes(), self.lite_vk.read_bytes())
+        upscalers = self.values()['Upscalers']
+        # Native Vulkan runs the FFX backend itself (which loads amdvkffx64);
+        # DX11 stays on the DX12 route.
+        self.assertEqual(upscalers['VulkanUpscaler'], 'ffx')
+        self.assertEqual(upscalers['Dx12Upscaler'], 'ffx')
+        self.assertEqual(upscalers['Dx11Upscaler'], 'ffx_12')
+        manifest = installer.read_manifest(self.target)
+        self.assertIn('OptiScaler/amdvkffx64.dll', manifest['files'])
+        self.assertTrue(manifest['fsr4_lite']['vulkan'])
+        status = installer.lite_status(self.target)
+        self.assertTrue(status['dx12']['valid'] and status['vulkan']['valid'])
+
+    def test_dx12_only_install_leaves_vulkan_on_the_dx12_route(self):
+        result = asyncio.run(self.service.enable_fsr4_lite(str(self.target), vulkan=False))
+        self.assertTrue(result['ok'])
+        self.assertFalse((self.target / 'OptiScaler' / 'amdvkffx64.dll').exists())
+        self.assertEqual(self.values()['Upscalers']['VulkanUpscaler'], 'ffx_12')
+        self.assertFalse(installer.read_manifest(self.target)['fsr4_lite']['vulkan'])
+
+    def test_disable_removes_both_libraries(self):
+        self.enable_lite()
+        self.assertTrue(asyncio.run(self.service.disable_fsr4_lite(str(self.target)))['ok'])
+        for name in ('amdxcffx64.dll', 'amdvkffx64.dll'):
+            self.assertFalse((self.target / 'OptiScaler' / name).exists())
+        self.assertFalse(any(f.endswith(('amdxcffx64.dll', 'amdvkffx64.dll'))
+                             for f in installer.read_manifest(self.target)['files']))
+
+    def test_a_vulkan_library_that_fails_verification_changes_nothing(self):
+        before = {n: (self.target / n).read_bytes() for n in (INI_NAME, MANIFEST_NAME)}
+        bad = self.root / 'bad-vk.dll'
+        bad.write_bytes(b'not the vulkan library')
+        with self.assertRaises(ValueError):
+            installer.install_fsr4_lite(self.target, self.lite, None, bad)
+        self.assertEqual(before, {n: (self.target / n).read_bytes() for n in (INI_NAME, MANIFEST_NAME)})
+        self.assertFalse((self.target / 'OptiScaler' / 'amdxcffx64.dll').exists())
+
+    def test_failure_after_the_first_dll_rolls_back_both(self):
+        before = {n: (self.target / n).read_bytes() for n in (INI_NAME, MANIFEST_NAME)}
+        # 1st atomic_copy = DX12 DLL, 2nd = Vulkan DLL fails.
+        with patch.object(installer, 'atomic_copy',
+                          side_effect=[None, OSError('disk full'), None, None, None]):
+            self.assertFalse(self.enable_lite()['ok'])
+        self.assertEqual(before, {n: (self.target / n).read_bytes() for n in (INI_NAME, MANIFEST_NAME)})
 
     def test_disable_removes_the_dll_and_resets_the_model_settings(self):
         self.enable_lite()
@@ -372,9 +450,12 @@ class LiteInstallTests(DeckFsr4Tests):
     def test_reinstall_keeps_the_dll_on_the_manifest_and_uninstall_removes_it(self):
         self.enable_lite()
         installer.install(self.target, self.payload)
-        self.assertIn('OptiScaler/amdxcffx64.dll', installer.read_manifest(self.target)['files'])
+        kept = installer.read_manifest(self.target)['files']
+        self.assertIn('OptiScaler/amdxcffx64.dll', kept)
+        self.assertIn('OptiScaler/amdvkffx64.dll', kept)
         installer.uninstall(self.target)
         self.assertFalse((self.target / 'OptiScaler' / 'amdxcffx64.dll').exists())
+        self.assertFalse((self.target / 'OptiScaler' / 'amdvkffx64.dll').exists())
         # The game's own file that setUp put there comes back, and nothing else stays.
         self.assertEqual(sorted(p.name for p in (self.target / 'OptiScaler').iterdir()),
                          ['amd_fidelityfx_upscaler_dx12.dll'])

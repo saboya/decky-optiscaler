@@ -448,6 +448,12 @@ def _read_measurements(report, raw):
     upscalers = raw.get("ffx_upscaler_versions") or ""
     report["ffx_upscaler_versions"] = [name for name in upscalers.split("|") if name]
     report["ffx_upscaler_index"] = _number(raw.get("ffx_upscaler_index"), int, unknown=-1)
+    # Which graphics API the game's upscaler is on (1 DX11, 2 DX12, 3 Vulkan) and
+    # which API's FFX list those versions came from. They differ in kind: the
+    # Vulkan list is the one that offers the driver's FSR 4, INT8 Lite included.
+    report["api"] = {1: "dx11", 2: "dx12", 3: "vulkan"}.get(_number(raw.get("api"), int))
+    report["ffx_upscaler_api"] = {2: "dx12", 3: "vulkan"}.get(
+        _number(raw.get("ffx_upscaler_api"), int))
     report["rendered_ms"] = _number(raw.get("rendered_ms"), float, unknown=0.0)
     report["presented_ms"] = _number(raw.get("presented_ms"), float, unknown=0.0)
     report["base_fps"], report["total_fps"] = _frame_rates(
@@ -479,6 +485,8 @@ def status(target_dir, source=None):
         "can_change_ffx_upscaler": False,
         "ffx_upscaler_index": None,
         "ffx_upscaler_versions": [],
+        "api": None,
+        "ffx_upscaler_api": None,
         # Which status-file format the in-game plugin speaks. An install that
         # predates a feature reports an older number rather than nothing at all.
         "schema": None,

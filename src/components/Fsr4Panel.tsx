@@ -127,7 +127,7 @@ export function Fsr4Panel({ targetDir, sources, gpu, onChanged }: Props) {
       {lite?.present ? (
         <PanelSectionRow>
           <ButtonItem layout="below" disabled={Boolean(busy)}
-            description={`Removes AMD's FSR ${lite.fsr} library from this game and hands the model choice back to OptiScaler. Close the game first.`}
+            description={`Removes AMD's FSR ${lite.fsr} libraries (${[lite.dx12.present && "DirectX", lite.vulkan.present && "Vulkan"].filter(Boolean).join(" and ")}) from this game and hands the model choice back to OptiScaler. Close the game first.`}
             onClick={async () => {
               setBusy(true);
               try {

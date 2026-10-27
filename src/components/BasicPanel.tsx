@@ -661,10 +661,10 @@ export function BasicPanel({
         {upscalerChoices.some((preset) => preset.id === "fsr4-lite") ? (
           <PanelSectionRow>
             <div style={{ fontSize: "12px", color: "#b8bcbf", padding: "4px 0" }}>
-              The Steam Deck preset downloads AMD's FSR 4.1.2 library (about 43 MB)
-              from AMD's driver package and accepts the AMD Software EULA on your
-              behalf. It is not part of this plugin. Avoid using it in games with
-              anti-cheat.
+              The Steam Deck preset downloads AMD's FSR 4.1.2 libraries (about 75 MB
+              in all: one for DirectX and one for Vulkan games) from AMD's driver
+              package and accepts the AMD Software EULA on your behalf. They are
+              not part of this plugin. Avoid using it in games with anti-cheat.
             </div>
           </PanelSectionRow>
         ) : null}
@@ -755,7 +755,7 @@ export function BasicPanel({
         {installingFsr4 || fsr4Error ? (
           <PanelSectionRow>
             <Notice tone={fsr4Error ? "error" : "info"} title={fsr4Error ? "FSR 4 setup failed" : "Setting up FSR 4.1.2 Lite…"}>
-              {fsr4Error ?? "Fetching AMD's FSR 4.1.2 library and enabling the INT8 Lite model. The first time this downloads about 43 MB."}
+              {fsr4Error ?? "Fetching AMD's FSR 4.1.2 library and enabling the INT8 Lite model. The first time this downloads about 75 MB."}
             </Notice>
           </PanelSectionRow>
         ) : null}

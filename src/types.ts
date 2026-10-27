@@ -491,6 +491,13 @@ export interface LiveStatus {
   /** Which of them the running game is configured for, as an index. */
   ffx_upscaler_index?: number | null;
   /**
+   * The graphics API the game's upscaler is on, and the API whose FFX list the
+   * versions above came from. The Vulkan list is the one that offers the
+   * driver's FSR 4 — INT8 Lite included — so they matter for what is on offer.
+   */
+  api?: "dx11" | "dx12" | "vulkan" | null;
+  ffx_upscaler_api?: "dx12" | "vulkan" | null;
+  /**
    * Whether the FSR version can be changed without a restart. It needs no flags
    * of its own — the same rebuild that switches upscaler re-reads it — so this
    * is really "there is a list to pick from and an upscaler to rebuild".

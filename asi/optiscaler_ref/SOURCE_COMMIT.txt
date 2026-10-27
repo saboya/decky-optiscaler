@@ -26,8 +26,8 @@ state_tail) are ported to this commit's State.h. What changed since v0.9.4:
     cannot tell the two apart any more; order does.
   * fgChanged/scChanged are 22/21 bytes before capturedHudlesses; frameCount is
     16 bytes before changeBackend.
-  * The FFX upscaler versions are two FfxVersionList structs (DX12, Vulkan);
-    only the DX12 one is read.
+  * The FFX upscaler versions are two FfxVersionList structs (DX12, Vulkan); the
+    ASI reads the one State::api selects.
   * skipHeapCapture and creatingD3DDevice are thread_local statics and take no
     room in the object.
 

@@ -20,6 +20,7 @@ from pathlib import Path
 
 RECIPE = {
     "id": "amd-4.1.2",
+    "api": "dx12",
     "driver": "Adrenalin 26.10.1",
     "fsr": "4.1.2",
     "file": "amdxcffx64.dll",
@@ -35,6 +36,26 @@ RECIPE = {
     "dll_size": 85684104,
     "sha256": "c33a287f3048bf02311cae430b6a977500b94ca7b315cd7bff751e6b03e483e3",
 }
+# The Vulkan build of the same library. Both come out of the same 7z block (the
+# one holding amdxcffx64.dll), at a dictionary reset 47.8 MB before this DLL, so
+# only ~30 MB is downloaded. Its CRC32 (54d9e289) is also what the archive's own
+# header records for it, which is an independent check on the decoded bytes.
+RECIPE_VULKAN = {
+    "id": "amd-4.1.2-vk",
+    "api": "vulkan",
+    "driver": "Adrenalin 26.10.1",
+    "fsr": "4.1.2",
+    "file": "amdvkffx64.dll",
+    "file_version": "2.4.0.4370",
+    "url": RECIPE["url"],
+    "referer": RECIPE["referer"],
+    "packed_offset": 791702864,
+    "unpacked_offset": 1342177280,
+    "dll_offset": 47769160,
+    "dll_size": 72497568,
+    "sha256": "80e761f7c8c0ec8ead7b321df01911baaf917defae51388d29eaecb1d6bc58bd",
+}
+RECIPES = {"dx12": RECIPE, "vulkan": RECIPE_VULKAN}
 EULA_URL = "https://www.amd.com/en/legal/eula/amd-software-eula.html"
 CHUNK = 1 << 20
 USER_AGENT = "Mozilla/5.0 (decky-optiscaler)"

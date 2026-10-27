@@ -66,12 +66,16 @@ export const setFsr4Build = callable<[targetDir: string, buildId: string], Actio
   "set_fsr4_build"
 );
 /** Download AMD's FSR 4.1.2 library, install it and select the INT8 Lite model. */
-export const enableFsr4Lite = callable<[targetDir: string], ActionResult>("enable_fsr4_lite");
+export const enableFsr4Lite = callable<[targetDir: string, vulkan?: boolean], ActionResult>(
+  "enable_fsr4_lite"
+);
 export const disableFsr4Lite = callable<[targetDir: string], ActionResult>("disable_fsr4_lite");
 export const getFsr4Lite = callable<
   [targetDir: string],
   { ok: boolean; present: boolean; valid: boolean; cached: boolean; eula_url: string;
-    driver: string; fsr: string; download_bytes: number; error?: string }
+    driver: string; fsr: string; download_bytes: number; download_bytes_vulkan: number;
+    dx12: { present: boolean; valid: boolean }; vulkan: { present: boolean; valid: boolean };
+    error?: string }
 >("get_fsr4_lite");
 /** Put the build that ships inside the OptiScaler release back. */
 export const restoreFsr4Build = callable<[targetDir: string], ActionResult>(

@@ -640,28 +640,43 @@ static bool FindChangeBackend(const StateLoc* state, BackendMap* out) {
 // -------------------------------------------------------- frame counter --
 
 /**
- * State::frameCount is declared before State::changeBackend with a bool, a bool
- * and a uint32 between them (vkAntiLagSupported, amdFlipMeterCreated,
- * amdFlipMeterMode), so it is the eight bytes sixteen in front of the map
- * already located. Sampling it between heartbeats is how this plugin reports
- * frame rate without being in the render loop itself.
+ * The run of State between `api` and `changeBackend`.
  *
- * A wrong guess here is harmless-but-useless rather than dangerous: the counter
- * is only ever read, never written, and a candidate that runs backwards or
- * absurdly fast is rejected -- and SearchFrameCounter looks for a real one if
- * this never moves.
+ * `api` is which graphics API the game's upscaler is on (OptiTypes.h: 0 none,
+ * 1 DX11, 2 DX12, 3 Vulkan), and decides which FFX version list applies --
+ * see FfxListForApi. `frameCount` is further down the same run, with a bool, a
+ * bool and a uint32 (vkAntiLagSupported, amdFlipMeterCreated, amdFlipMeterMode)
+ * between it and the map.
+ *
+ * frameCount is only ever read, never written, so a wrong guess is harmless-but-
+ * useless rather than dangerous, and SearchFrameCounter looks for a real one if
+ * this never moves. It also never moves in a native Vulkan game: OptiScaler
+ * only counts frames in the DXGI swapchain wrapper (wrapped_swapchain.cpp), so
+ * with no DXGI swapchain there is nothing to count, and the frame rate reads as
+ * unavailable. That is a property of OptiScaler, not of this mirror.
  */
 struct state_frame_head {
+    uint32_t api;
+    uint32_t swapchainApi;
+    uint32_t swapchainInteropApi;
+    bool reflexLimitsFps;
+    bool reflexShowWarning;
+    bool rtssReflexInjection;
+    uint64_t reflexFrameId;
     uint64_t frameCount;
     bool vkAntiLagSupported;
     bool amdFlipMeterCreated;
     uint32_t amdFlipMeterMode;
 };
-static_assert(sizeof(state_frame_head) == 16, "frameCount is 16 bytes in front of changeBackend");
+static_assert(sizeof(state_frame_head) == 40, "api is 40 bytes in front of changeBackend");
+static_assert(offsetof(state_frame_head, frameCount) == 24, "frameCount is 16 bytes in front of the map");
+
+enum { API_DX11 = 1, API_DX12 = 2, API_VULKAN = 3 };
 
 static uint64_t* FindFrameCount(const BackendMap* map) {
     if (!map->table) return NULL;
-    uint64_t* candidate = (uint64_t*) ((unsigned char*) map->table - sizeof(state_frame_head));
+    uint64_t* candidate = (uint64_t*) ((unsigned char*) map->table - sizeof(state_frame_head) +
+                                       offsetof(state_frame_head, frameCount));
     if (!Readable(candidate, sizeof(uint64_t))) return NULL;
     return candidate;
 }
@@ -1025,6 +1040,9 @@ static int g_ffxFgCount = 0;
 // exact FSR versions -- "4.1.1", "3.1.5" -- that OptiScaler's overlay shows.
 static char g_ffxUpscalerNames[FFX_FG_MAX][FFX_FG_NAME_MAX];
 static int g_ffxUpscalerCount = 0;
+// Which graphics API's list those names came from (API_DX12 / API_VULKAN), so a
+// game whose API is only known later does not keep the other API's versions.
+static int g_ffxUpscalerApi = 0;
 // Exponentially smoothed copies of the two intervals above, in milliseconds.
 // Each is the last frame's delta rather than an average, so a single reading is
 // as noisy as one frame; the panel wants a number that holds still.
@@ -1600,6 +1618,16 @@ static int ReadIntField(const char* name) {
     return opt->value_or_default();
 }
 
+/** State::api: 0 until the game's upscaler has been created, then 1 DX11, 2 DX12, 3 Vulkan. */
+static int ReadApi() {
+    if (!g_backends.table) return 0;
+    const uint32_t* api = (const uint32_t*) ((const unsigned char*) g_backends.table -
+                                             sizeof(state_frame_head) +
+                                             offsetof(state_frame_head, api));
+    if (!Readable(api, sizeof(uint32_t))) return 0;
+    return *api <= API_VULKAN ? (int) *api : 0;
+}
+
 /** One of the FFX version lists, joined for a single status line. */
 static void FfxVersionList(const char names[FFX_FG_MAX][FFX_FG_NAME_MAX], int count,
                            char* out, size_t outLen) {
@@ -1637,7 +1665,7 @@ static void WriteStatus(const char* status) {
 
     char body[4096];
     int n = snprintf(body, sizeof(body),
-                     "schema 5\n"
+                     "schema 6\n"
                      "status %s\n"
                      "seq %ld\n"
                      "applied %d\n"
@@ -1660,6 +1688,8 @@ static void WriteStatus(const char* status) {
                      "ffx_fg_versions %s\n"
                      "ffx_upscaler_index %d\n"
                      "ffx_upscaler_versions %s\n"
+                     "api %d\n"
+                     "ffx_upscaler_api %d\n"
                      "rendered_ms %.3f\n"
                      "presented_ms %.3f\n"
                      "error %s\n",
@@ -1668,7 +1698,8 @@ static void WriteStatus(const char* status) {
                      BackendEntryCount(), (unsigned long long) g_framesSeen,
                      dir, g_fps, ReadBoolField("FGEnabled"), dx12, dx11, vk, live,
                      (void*) g_fgFlags.fgChanged, ReadIntField("FfxFGIndex"), ffxFg,
-                     ReadIntField("FfxUpscalerIndex"), ffxUpscaler,
+                     ReadIntField("FfxUpscalerIndex"), ffxUpscaler, ReadApi(),
+                     g_ffxUpscalerApi,
                      g_renderedMs, g_presentedMs, g_error);
     if (n < 0) return;
     HANDLE h = CreateFileW(g_statusPath, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
@@ -1757,6 +1788,24 @@ static bool AdoptFfxVersions(size_t namesOffset, size_t idsOffset, const char* w
 }
 
 /**
+ * Which of State's two FFX upscaler lists applies to this game.
+ *
+ * OptiScaler keeps one for DX12 (including DX11-on-12 and Vulkan-on-12) and one
+ * for native Vulkan, because the two FFX runtimes can report different
+ * upscalers -- and only the Vulkan one lists the driver's FSR 4, which is where
+ * the INT8 Lite model lives. GetFfxVersionList in the overlay chooses by
+ * (backend, api); with the backend not known here, api alone does it, and 0
+ * means nothing has been created yet, so there is nothing to read.
+ *
+ * Returns the offset of the names vector, or 0.
+ */
+static size_t FfxListOffsetForApi(int api) {
+    if (api == API_VULKAN) return offsetof(state_tail, ffxUpscalerVersionsVk.names);
+    if (api == API_DX11 || api == API_DX12) return offsetof(state_tail, ffxUpscalerVersionsDx12.names);
+    return 0;
+}
+
+/**
  * The rest of what State has to offer, all of which depends on the map above.
  *
  * Kept apart from DiscoverBackendMap because none of it is required for the
@@ -1771,10 +1820,21 @@ static void DiscoverStateExtras() {
         AdoptFfxVersions(offsetof(state_tail, ffxFGVersionNames),
                          offsetof(state_tail, ffxFGVersionIds), "FG",
                          g_ffxFgNames, &g_ffxFgCount);
-    if (g_ffxUpscalerCount == 0)
-        AdoptFfxVersions(offsetof(state_tail, ffxUpscalerVersionsDx12.names),
-                         offsetof(state_tail, ffxUpscalerVersionsDx12.ids), "upscaler",
-                         g_ffxUpscalerNames, &g_ffxUpscalerCount);
+    int api = ReadApi();
+    // A list read for the other API is stale once the game says which one it is.
+    if (g_ffxUpscalerCount > 0 && api != 0 && api != g_ffxUpscalerApi &&
+        (api == API_VULKAN) != (g_ffxUpscalerApi == API_VULKAN)) {
+        LogLine("graphics API changed (%d -> %d); rereading the FFX upscaler versions",
+                g_ffxUpscalerApi, api);
+        g_ffxUpscalerCount = 0;
+    }
+    if (g_ffxUpscalerCount == 0) {
+        size_t names = FfxListOffsetForApi(api);
+        if (names &&
+            AdoptFfxVersions(names, names + sizeof(msvc_vector_raw), "upscaler",
+                             g_ffxUpscalerNames, &g_ffxUpscalerCount))
+            g_ffxUpscalerApi = api;
+    }
 }
 
 /** Poll ticks between status rewrites; the loop sleeps 200ms per tick. */

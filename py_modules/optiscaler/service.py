@@ -470,23 +470,36 @@ class OptiScalerService:
             return {"ok": False, "error": str(exc)}
 
     async def get_fsr4_lite(self, target_dir):
-        """Whether AMD's FSR 4.1.2 library is installed for this game, and what it needs."""
+        """Whether AMD's FSR 4.1.2 libraries are installed for this game, and what they cost."""
         try:
             status = await self._run(installer.lite_status, target_dir)
-            cached = await self._run(
-                fsr4lite.is_valid, fsr4lite.cached_path(self.fsr4_build_cache()))
-            return {"ok": True, **status, "cached": cached, "eula_url": fsr4lite.EULA_URL,
-                    "download_bytes": fsr4lite.RECIPE["dll_size"]}
+            cache = self.fsr4_build_cache()
+            cached = {
+                api: await self._run(fsr4lite.is_valid, fsr4lite.cached_path(cache, recipe), recipe)
+                for api, recipe in fsr4lite.RECIPES.items()
+            }
+            return {"ok": True, **status, "cached": all(cached.values()),
+                    "cached_by_api": cached, "eula_url": fsr4lite.EULA_URL,
+                    "download_bytes": fsr4lite.RECIPE["dll_size"],
+                    "download_bytes_vulkan": fsr4lite.RECIPE_VULKAN["dll_size"]}
         except Exception as exc:
             self.log.exception("FSR 4 Lite status failed for %s", target_dir)
             return {"ok": False, "error": str(exc)}
 
-    async def enable_fsr4_lite(self, target_dir):
-        """Fetch AMD's library (once), then install it and select the Lite model."""
+    async def enable_fsr4_lite(self, target_dir, vulkan=True):
+        """Fetch AMD's libraries (once), then install them and select the Lite model.
+
+        The DX12 library covers DX12 and DX11 games (and anything OptiScaler runs
+        through DX12); the Vulkan one is for native Vulkan games, and is fetched
+        too unless ``vulkan`` is off, since the game's API is not known here.
+        """
         try:
-            dll = await self._run(
-                fsr4lite.ensure, self.fsr4_build_cache(), fsr4lite.RECIPE, self.log)
-            result = await self._run(installer.install_fsr4_lite, target_dir, dll, self.log)
+            cache = self.fsr4_build_cache()
+            dll = await self._run(fsr4lite.ensure, cache, fsr4lite.RECIPE, self.log)
+            vk = None
+            if vulkan:
+                vk = await self._run(fsr4lite.ensure, cache, fsr4lite.RECIPE_VULKAN, self.log)
+            result = await self._run(installer.install_fsr4_lite, target_dir, dll, self.log, vk)
             return {"ok": True, **result}
         except Exception as exc:
             self.log.exception("FSR 4 Lite setup failed for %s", target_dir)
@@ -771,7 +784,7 @@ class OptiScalerService:
                 "values": IniFile(path).to_dict(),
                 "modified": path.stat().st_mtime,
                 "fsr4_build": "lite" if (installer.read_manifest(path.parent) or {}).get("fsr4_lite")
-                and (path.parent / installer.LITE_DLL).is_file()
+                and any((path.parent / name).is_file() for name in installer.LITE_DLLS)
                 else (fsr4build.identify(path.parent / installer.FFX_UPSCALER_PATH) or {}).get("id"),
             }
 

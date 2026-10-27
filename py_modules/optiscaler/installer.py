@@ -404,6 +404,8 @@ def restore_fsr4_build(target_dir, payload_root, logger=None):
 
 
 LITE_DLL = f"{SUPPORT_DIR}/amdxcffx64.dll"
+LITE_DLL_VK = f"{SUPPORT_DIR}/amdvkffx64.dll"
+LITE_DLLS = (LITE_DLL, LITE_DLL_VK)
 
 #: What choosing FSR 4.1.2 Lite writes. Fsr4GpuSupport=4 tells OptiScaler to treat
 #: the GPU as one the INT8 Lite model runs on; Fsr4Model=3 selects it. The
@@ -414,33 +416,57 @@ LITE_SETTINGS = {
     "FSR": {"Fsr4GpuSupport": "4", "Fsr4Model": "3", "UpscalerIndex": "0",
             "Fsr4Preset": "auto", "Fsr4EnableWatermark": "true"},
 }
+#: With the Vulkan library too, native Vulkan games use the FFX backend directly
+#: (it is the one that loads amdvkffx64); ffx_12 would run them through DX12,
+#: where amdxcffx64 is used instead. UpscalerIndex is left to the game's own
+#: list: the Vulkan list appends the driver's FSR 4 after the SDK's versions, so
+#: index 0 is not it, and the right index is only known once the game has asked.
+LITE_SETTINGS_VULKAN = {
+    "Upscalers": {"VulkanUpscaler": "ffx"},
+}
 LITE_RESET = {
     "FSR": {"Fsr4GpuSupport": "auto", "Fsr4Model": "auto", "Fsr4EnableWatermark": "auto"},
 }
 
 
 def lite_status(target_dir):
-    """Whether the AMD FSR 4.1.2 library is in this install, and which one."""
+    """Whether AMD's FSR 4.1.2 libraries are in this install, and which."""
     from . import fsr4lite
 
-    dll = Path(target_dir) / LITE_DLL
+    target = Path(target_dir)
     manifest = read_manifest(target_dir) or {}
+
+    def one(relative, recipe):
+        dll = target / relative
+        return {"present": dll.is_file(),
+                "valid": dll.is_file() and fsr4lite.is_valid(dll, recipe)}
+
+    dx12 = one(LITE_DLL, fsr4lite.RECIPE)
+    vulkan = one(LITE_DLL_VK, fsr4lite.RECIPE_VULKAN)
     return {
-        "present": dll.is_file(),
-        "valid": dll.is_file() and fsr4lite.is_valid(dll),
+        "present": dx12["present"] or vulkan["present"],
+        "valid": dx12["valid"] and (vulkan["valid"] or not vulkan["present"]),
+        "dx12": dx12,
+        "vulkan": vulkan,
         "recorded": bool(manifest.get("fsr4_lite")),
         "driver": fsr4lite.RECIPE["driver"],
         "fsr": fsr4lite.RECIPE["fsr"],
     }
 
 
-def _apply_lite(target_dir, changes, dll_path=None, record=None, logger=None):
-    """Write the DLL (or remove it), the settings and the manifest as one unit."""
+def _apply_lite(target_dir, changes, dlls=None, record=None, logger=None):
+    """Write the DLLs (or remove them), the settings and the manifest as one unit.
+
+    ``dlls`` maps a path under the game folder to the verified file to put there;
+    every ``LITE_DLLS`` entry not in it is removed, so enabling and disabling go
+    through the same all-or-nothing path.
+    """
     manifest = require_stopped_install(target_dir)
     target = Path(target_dir)
+    dlls = dlls or {}
     if not (target / INI_NAME).is_file():
         raise FileNotFoundError("OptiScaler.ini not found")
-    names = [LITE_DLL, MANIFEST_NAME, INI_NAME]
+    names = [*LITE_DLLS, MANIFEST_NAME, INI_NAME]
     with tempfile.TemporaryDirectory(prefix=".decky-fsr4-", dir=target) as staging:
         staging = Path(staging)
         flat = {name: name.replace("/", "__") for name in names}
@@ -459,16 +485,16 @@ def _apply_lite(target_dir, changes, dll_path=None, record=None, logger=None):
             ini.path = staging / "new.ini"
             ini.save()
 
-            if dll_path is not None:
-                (target / SUPPORT_DIR).mkdir(exist_ok=True)
-                atomic_copy(dll_path, target / LITE_DLL)
-            else:
-                (target / LITE_DLL).unlink(missing_ok=True)
+            for name in LITE_DLLS:
+                if name in dlls:
+                    (target / SUPPORT_DIR).mkdir(exist_ok=True)
+                    atomic_copy(dlls[name], target / name)
+                else:
+                    (target / name).unlink(missing_ok=True)
             atomic_copy(ini.path, target / INI_NAME)
 
-            files = [f for f in manifest.get("files", []) if f != LITE_DLL]
-            if dll_path is not None:
-                files.append(LITE_DLL)
+            files = [f for f in manifest.get("files", []) if f not in LITE_DLLS]
+            files.extend(name for name in LITE_DLLS if name in dlls)
             manifest["files"] = files
             manifest["fsr4_lite"] = record or {}
             staged = staging / "new.json"
@@ -483,24 +509,39 @@ def _apply_lite(target_dir, changes, dll_path=None, record=None, logger=None):
             raise
 
 
-def install_fsr4_lite(target_dir, dll_path, logger=None):
-    """Put AMD's FSR 4.1.2 library next to OptiScaler and select the Lite model."""
+def install_fsr4_lite(target_dir, dll_path, logger=None, vulkan_dll_path=None):
+    """Put AMD's FSR 4.1.2 library next to OptiScaler and select the Lite model.
+
+    ``vulkan_dll_path`` adds the Vulkan build for native Vulkan games.
+    """
     from . import fsr4lite
 
     if not fsr4lite.is_valid(dll_path):
         raise ValueError("AMD FSR 4 DLL checksum mismatch")
+    dlls = {LITE_DLL: dll_path}
+    changes = {section: dict(values) for section, values in LITE_SETTINGS.items()}
     record = {"driver": fsr4lite.RECIPE["driver"], "fsr": fsr4lite.RECIPE["fsr"],
-              "sha256": fsr4lite.RECIPE["sha256"], "installed_at": time.time()}
-    _apply_lite(target_dir, LITE_SETTINGS, dll_path, record, logger)
+              "sha256": fsr4lite.RECIPE["sha256"], "installed_at": time.time(),
+              "vulkan": False}
+    if vulkan_dll_path is not None:
+        if not fsr4lite.is_valid(vulkan_dll_path, fsr4lite.RECIPE_VULKAN):
+            raise ValueError("AMD FSR 4 Vulkan DLL checksum mismatch")
+        dlls[LITE_DLL_VK] = vulkan_dll_path
+        record["vulkan"] = True
+        record["vulkan_sha256"] = fsr4lite.RECIPE_VULKAN["sha256"]
+        for section, values in LITE_SETTINGS_VULKAN.items():
+            changes.setdefault(section, {}).update(values)
+    _apply_lite(target_dir, changes, dlls, record, logger)
     if logger:
-        logger.info("FSR 4.1.2 Lite enabled in %s", target_dir)
-    return {"path": str(target_dir), "file": LITE_DLL, "lite": record}
+        logger.info("FSR 4.1.2 Lite enabled in %s%s", target_dir,
+                    " (with the Vulkan library)" if vulkan_dll_path else "")
+    return {"path": str(target_dir), "file": LITE_DLL, "files": list(dlls), "lite": record}
 
 
 def remove_fsr4_lite(target_dir, logger=None):
-    """Take AMD's library out and hand the model choice back to OptiScaler."""
+    """Take AMD's libraries out and hand the model choice back to OptiScaler."""
     _apply_lite(target_dir, LITE_RESET, None, {}, logger)
-    return {"path": str(target_dir), "removed": LITE_DLL}
+    return {"path": str(target_dir), "removed": list(LITE_DLLS)}
 
 
 def add_files(target_dir, sources, logger=None, reframework_revision=None):
@@ -769,9 +810,11 @@ def install(target_dir, payload_root, filename=DEFAULT_PROXY, preserve_ini=True,
     # AMD's FSR 4.1.2 library, if the user chose Lite earlier: a reinstall must
     # keep it on the manifest or uninstall would leave it behind.
     lite_record = old_manifest.get("fsr4_lite") or {}
-    if lite_record and (target / LITE_DLL).is_file():
-        if LITE_DLL not in created:
-            created.append(LITE_DLL)
+    kept = [name for name in LITE_DLLS if (target / name).is_file()]
+    if lite_record and kept:
+        for name in kept:
+            if name not in created:
+                created.append(name)
     else:
         lite_record = {}
 

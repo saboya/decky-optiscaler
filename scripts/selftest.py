@@ -1919,7 +1919,8 @@ def check_asi_state_layout():
     for text, why in (
         ("offsetof(state_head, gameName) == 32", "where gameName sits"),
         ("offsetof(state_head, gameVersion) == 72", "where gameVersion sits"),
-        ("sizeof(state_frame_head) == 16", "how far in front of the map frameCount sits"),
+        ("sizeof(state_frame_head) == 40", "how far in front of the map api sits"),
+        ("offsetof(state_frame_head, frameCount) == 24", "how far in front of the map frameCount sits"),
         ("FG_BLOCK_OFF(fgChanged) == -22", "how far in front of the table the flag sits"),
         ("FG_BLOCK_OFF(scChanged) == -21", "the flag beside it"),
         ("FG_BLOCK_OFF(NVNGX_ApplicationId) == 72", "the value that confirms the table"),
@@ -1951,7 +1952,9 @@ def check_asi_state_layout():
     # newBackend, lastMipBias and lastMipBiasMax are not pinned on their own: the
     # first is pinned as sizeof(ud_table), the other two follow xessDebugFrames.
     check("every other member in that table is one live.cpp pins some other way",
-          set(unpinned) <= {"newBackend", "lastMipBias", "lastMipBiasMax", "presentFrameTime"},
+          set(unpinned) <= {"newBackend", "lastMipBias", "lastMipBiasMax", "presentFrameTime",
+                            "ffxUpscalerVersionsVk.names", "ffxUpscalerVersionsVk.ids",
+                            "api", "swapchainApi"},
           unpinned)
 
     # The flags are written, so identification has to be unambiguous or refused.
