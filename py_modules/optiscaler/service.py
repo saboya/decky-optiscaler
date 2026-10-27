@@ -5,7 +5,7 @@ import os
 import time
 from pathlib import Path
 
-from . import autoplan, fsr4build, installer, live, monitor, reframework, steam
+from . import autoplan, fsr4build, fsr4lite, installer, live, monitor, reframework, steam
 from .constants import (
     DEFAULT_PROXY,
     INI_NAME,
@@ -469,6 +469,37 @@ class OptiScalerService:
             self.log.exception("FSR 4 setup failed for %s", target_dir)
             return {"ok": False, "error": str(exc)}
 
+    async def get_fsr4_lite(self, target_dir):
+        """Whether AMD's FSR 4.1.2 library is installed for this game, and what it needs."""
+        try:
+            status = await self._run(installer.lite_status, target_dir)
+            cached = await self._run(
+                fsr4lite.is_valid, fsr4lite.cached_path(self.fsr4_build_cache()))
+            return {"ok": True, **status, "cached": cached, "eula_url": fsr4lite.EULA_URL,
+                    "download_bytes": fsr4lite.RECIPE["dll_size"]}
+        except Exception as exc:
+            self.log.exception("FSR 4 Lite status failed for %s", target_dir)
+            return {"ok": False, "error": str(exc)}
+
+    async def enable_fsr4_lite(self, target_dir):
+        """Fetch AMD's library (once), then install it and select the Lite model."""
+        try:
+            dll = await self._run(
+                fsr4lite.ensure, self.fsr4_build_cache(), fsr4lite.RECIPE, self.log)
+            result = await self._run(installer.install_fsr4_lite, target_dir, dll, self.log)
+            return {"ok": True, **result}
+        except Exception as exc:
+            self.log.exception("FSR 4 Lite setup failed for %s", target_dir)
+            return {"ok": False, "error": str(exc)}
+
+    async def disable_fsr4_lite(self, target_dir):
+        try:
+            result = await self._run(installer.remove_fsr4_lite, target_dir, self.log)
+            return {"ok": True, **result}
+        except Exception as exc:
+            self.log.exception("FSR 4 Lite removal failed for %s", target_dir)
+            return {"ok": False, "error": str(exc)}
+
     async def restore_fsr4_build(self, target_dir):
         try:
             payload_root = await self.ensure_payload()
@@ -739,7 +770,9 @@ class OptiScalerService:
                 "path": str(path),
                 "values": IniFile(path).to_dict(),
                 "modified": path.stat().st_mtime,
-                "fsr4_build": (fsr4build.identify(path.parent / installer.FFX_UPSCALER_DLL) or {}).get("id"),
+                "fsr4_build": "lite" if (installer.read_manifest(path.parent) or {}).get("fsr4_lite")
+                and (path.parent / installer.LITE_DLL).is_file()
+                else (fsr4build.identify(path.parent / installer.FFX_UPSCALER_PATH) or {}).get("id"),
             }
 
         return await self._run(work)

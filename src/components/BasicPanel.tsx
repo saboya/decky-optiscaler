@@ -264,8 +264,8 @@ export function BasicPanel({
   // in it is the other way round: the upgrade path is what reaches FSR 4, and
   // the INT8 preset is the one that does nothing.
   const fsr4Selected = upscalerPreset?.id === "fsr4";
-  const int8Selected = upscalerPreset?.id === "fsr4-int8";
-  const int8Route = needsForcedInt8(gpu) && (fsr4Build === "4.1.1b" || supportsInt8Override(ffx));
+  const int8Selected = upscalerPreset?.id === "fsr4-lite";
+  const int8Route = needsForcedInt8(gpu) && (fsr4Build === "lite" || supportsInt8Override(ffx));
 
   // DLSS needs a real Nvidia GPU; offering it on a Deck is offering a setting
   // that can only fail. Kept visible when the ini already selects it, so the
@@ -282,7 +282,7 @@ export function BasicPanel({
         upscalerPreset?.id === "dlss" ||
         !gpu?.vendor ||
         gpu.vendor === "nvidia") &&
-      (preset.id !== "fsr4-int8" || needsForcedInt8(gpu) || int8Selected)
+      (preset.id !== "fsr4-lite" || needsForcedInt8(gpu) || int8Selected)
   );
 
   const needsInt8 = fsr4Selected && int8Route;
@@ -637,13 +637,13 @@ export function BasicPanel({
             // The Advanced page can set a backend no preset covers — fsr21, or
             // one of the dx11on12 variants. Showing "Auto" for those said the
             // opposite of what the file holds.
-            selected={int8Selected && fsr4Build !== "4.1.1b" ? "manual-int8" : upscalerPreset?.id ?? rawUpscaler}
+            selected={upscalerPreset?.id ?? rawUpscaler}
             describe={(code) => code === "manual-int8" ? "FSR 4 INT8 (manual)" : curatedLabel("Upscalers.Dx12Upscaler", code) ?? code}
             onPick={(id) => {
               const preset = UPSCALER_PRESETS.find((p) => p.id === id);
               if (!preset) return;
               setFsr4Error(null);
-              if (preset.id === "fsr4-int8") {
+              if (preset.id === "fsr4-lite") {
                 if (!onEnableFsr4) return;
                 setInstallingFsr4(true);
                 void onEnableFsr4().then(() => setPicked(preset.id))
@@ -658,11 +658,13 @@ export function BasicPanel({
           />
         </PanelSectionRow>
 
-        {upscalerChoices.some((preset) => preset.id === "fsr4-int8") ? (
+        {upscalerChoices.some((preset) => preset.id === "fsr4-lite") ? (
           <PanelSectionRow>
             <div style={{ fontSize: "12px", color: "#b8bcbf", padding: "4px 0" }}>
-              The Steam Deck preset downloads a modified game DLL redistributed
-              by the community. Avoid using it in games with anti-cheat.
+              The Steam Deck preset downloads AMD's FSR 4.1.2 library (about 43 MB)
+              from AMD's driver package and accepts the AMD Software EULA on your
+              behalf. It is not part of this plugin. Avoid using it in games with
+              anti-cheat.
             </div>
           </PanelSectionRow>
         ) : null}
@@ -752,30 +754,30 @@ export function BasicPanel({
 
         {installingFsr4 || fsr4Error ? (
           <PanelSectionRow>
-            <Notice tone={fsr4Error ? "error" : "info"} title={fsr4Error ? "FSR 4 setup failed" : "Setting up FSR 4.1.1b…"}>
-              {fsr4Error ?? "Downloading and enabling the Steam Deck upscaler."}
+            <Notice tone={fsr4Error ? "error" : "info"} title={fsr4Error ? "FSR 4 setup failed" : "Setting up FSR 4.1.2 Lite…"}>
+              {fsr4Error ?? "Fetching AMD's FSR 4.1.2 library and enabling the INT8 Lite model. The first time this downloads about 43 MB."}
             </Notice>
           </PanelSectionRow>
         ) : null}
         {int8Selected ? (
           <PanelSectionRow>
-            <Notice tone="info" title={fsr4Build === "4.1.1b" ? "FSR 4.1.1b ready for the next launch" : "Manual INT8 settings"}>
-              {fsr4Build === "4.1.1b"
-                ? "Experimental RDNA2 upscaling. Check for FSR4-I8 in the game's watermark. Frame generation is configured separately."
-                : "Select FSR 4.1.1b — Steam Deck to install the RDNA2 ghosting fix."}
+            <Notice tone="info" title={fsr4Build === "lite" ? "FSR 4.1.2 Lite ready for the next launch" : "FSR 4 Lite settings without AMD's library"}>
+              {fsr4Build === "lite"
+                ? "Experimental on the Steam Deck. Check the game's watermark for FSR4 and the INT8 Lite model. Frame generation is configured separately."
+                : "Select FSR 4.1.2 Lite — Steam Deck again to fetch AMD's library."}
             </Notice>
           </PanelSectionRow>
         ) : needsInt8 || ffxUpsNeedsInt8 ? (
           <PanelSectionRow>
             <Notice tone="info" title="FSR 4 on Steam Deck">
-              Select FSR 4.1.1b — Steam Deck to install the RDNA2 build and enable INT8.
+              Select FSR 4.1.2 Lite — Steam Deck to install AMD's library and enable the Lite model.
             </Notice>
           </PanelSectionRow>
         ) : fsr4Selected && !compact ? (
           <PanelSectionRow>
             <Notice tone="info" title="FSR 4 selected">
-              Uses the FidelityFX 4.1 library bundled with OptiScaler. OptiScaler only picks
-              FSR 4 by itself on RDNA 4, which is why choosing it here also sets the FSR
+              Uses the FidelityFX library bundled with OptiScaler. OptiScaler picks the FSR 4
+              model its GPU check allows, which is why choosing it here also sets the FSR
               backend explicitly.
             </Notice>
           </PanelSectionRow>

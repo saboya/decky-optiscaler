@@ -168,6 +168,17 @@ def infer(key, comments):
         return info, keep
 
     enum = parse_enum(value_part)
+    # 10.x writes some value lists on the line *before* the "Default (auto) is"
+    # line, so the spec line carries no values at all.
+    if not enum and not value_part.strip() and len(comments) >= 2:
+        enum = parse_enum(comments[-2])
+        if enum and comments[-2] is not comments[-1]:
+            tokens, labels = enum
+            info["type"] = "enum"
+            info["options"] = tokens
+            if labels:
+                info["optionLabels"] = labels
+            return info, comments[:-2]
     if enum:
         tokens, labels = enum
         info["type"] = "enum"

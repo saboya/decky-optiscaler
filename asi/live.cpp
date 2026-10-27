@@ -437,7 +437,7 @@ static bool VectorOfStride(const msvc_vector_raw* v, size_t stride, size_t* coun
 // The backend ids OptiScaler accepts (OptiScaler/menu/menu_common.cpp, the
 // AddDx11/Dx12/VulkanBackends combos).
 static const char* kBackendCodes[] = { "xess",  "xess_12", "fsr21", "fsr21_12", "fsr22",
-                                       "fsr22_12", "fsr31", "fsr31_12", "dlss", "dlssd" };
+                                       "fsr22_12", "fsr31", "fsr31_12", "ffx", "ffx_12", "dlss", "dlssd" };
 
 static bool IsBackendCode(const char* code) {
     for (size_t i = 0; i < sizeof(kBackendCodes) / sizeof(kBackendCodes[0]); i++)
@@ -1822,10 +1822,15 @@ static void SetUpPaths(HMODULE self) {
     GetModuleFileNameW(self, path, MAX_PATH);
     wchar_t* slash = wcsrchr(path, L'\\');
     if (slash) *slash = 0;
-    // The .asi lives in <optiscaler dir>\plugins, so the control files go one
-    // level up, next to OptiScaler.ini where the plugin already writes.
+    // The .asi lives in <game>\OptiScaler\plugins (10.x; 0.9.x used
+    // <game>\plugins), so the control files go up past those folders, next to
+    // OptiScaler.ini where the plugin already writes.
     wchar_t* up = wcsrchr(path, L'\\');
-    if (up && _wcsicmp(up + 1, L"plugins") == 0) *up = 0;
+    if (up && _wcsicmp(up + 1, L"plugins") == 0) {
+        *up = 0;
+        up = wcsrchr(path, L'\\');
+        if (up && _wcsicmp(up + 1, L"OptiScaler") == 0) *up = 0;
+    }
     wcsncpy(g_dir, path, MAX_PATH - 1);
     g_dir[MAX_PATH - 1] = 0;
 

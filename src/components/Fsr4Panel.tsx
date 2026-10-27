@@ -1,7 +1,7 @@
 import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
 import { toaster } from "@decky/api";
 import { useCallback, useEffect, useState } from "react";
-import { getFsr4Info, restoreFsr4Build, importFsr4Files, verifyInstall } from "../api";
+import { disableFsr4Lite, getFsr4Info, getFsr4Lite, restoreFsr4Build, importFsr4Files, verifyInstall } from "../api";
 import type { Fsr4Build, Fsr4Source, GpuInfo, VerifyResult } from "../types";
 import { KeyValue, Mono, Notice, Pill } from "./Common";
 
@@ -15,7 +15,7 @@ interface Props {
 const GPU_NOTE: Record<string, string> = {
   native: "This GPU runs FSR 4 natively.",
   int8: "This GPU can run FSR 4 through the INT8 model.",
-  experimental: "Select FSR 4.1.1b — Steam Deck in Basic settings for experimental RDNA2 upscaling.",
+  experimental: "Select FSR 4.1.2 Lite — Steam Deck in Basic settings for experimental FSR 4 upscaling.",
   unsupported:
     "AMD supports FSR 4 on RDNA 3 and RDNA 4 only. RDNA 2 — which includes the Steam Deck — is not supported yet.",
   unknown: "Could not identify this GPU from sysfs.",
@@ -32,11 +32,13 @@ export function Fsr4Panel({ targetDir, sources, gpu, onChanged }: Props) {
   const [report, setReport] = useState<VerifyResult | null>(null);
   const [build, setBuild] = useState<Fsr4Build | null>(null);
   const [busy, setBusy] = useState(false);
+  const [lite, setLite] = useState<Awaited<ReturnType<typeof getFsr4Lite>> | null>(null);
 
   const verify = useCallback(async () => {
     try {
       setReport(await verifyInstall(targetDir));
       setBuild((await getFsr4Info(targetDir)).status.build ?? null);
+      setLite(await getFsr4Lite(targetDir));
     } catch (exc) {
       toaster.toast({ title: "Verification failed", body: String(exc) });
     }
@@ -80,8 +82,8 @@ export function Fsr4Panel({ targetDir, sources, gpu, onChanged }: Props) {
       {ffx?.fsr4_capable ? (
         <PanelSectionRow>
           <Notice tone="success" title="FSR 4 is present">
-            On Steam Deck, select <b>FSR 4.1.1b — Steam Deck</b> in Basic settings.
-            This installs the community RDNA2 fix and enables INT8 upscaling.
+            On Steam Deck, select <b>FSR 4.1.2 Lite — Steam Deck</b> in Basic settings.
+            This fetches AMD's FSR 4.1.2 library and selects its INT8 Lite model.
           </Notice>
         </PanelSectionRow>
       ) : null}
@@ -119,6 +121,25 @@ export function Fsr4Panel({ targetDir, sources, gpu, onChanged }: Props) {
               } finally { setBusy(false); }
             }}>
             Restore bundled upscaler
+          </ButtonItem>
+        </PanelSectionRow>
+      ) : null}
+      {lite?.present ? (
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={Boolean(busy)}
+            description={`Removes AMD's FSR ${lite.fsr} library from this game and hands the model choice back to OptiScaler. Close the game first.`}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                const result = await disableFsr4Lite(targetDir);
+                if (!result.ok) throw new Error(result.error);
+                await onChanged();
+                await verify();
+              } catch (error) {
+                toaster.toast({ title: "Could not remove FSR 4 Lite", body: String(error) });
+              } finally { setBusy(false); }
+            }}>
+            Remove FSR 4.1.2 Lite
           </ButtonItem>
         </PanelSectionRow>
       ) : null}

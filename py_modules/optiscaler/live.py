@@ -21,10 +21,10 @@ import re
 import time
 from pathlib import Path
 
-from .constants import BACKUP_DIR
+from .constants import BACKUP_DIR, SUPPORT_DIR
 
 ASI_NAME = "decky_optiscaler_live.asi"
-PLUGIN_SUBDIR = "plugins"
+PLUGIN_SUBDIR = f"{SUPPORT_DIR}/plugins"
 CMD_FILE = "decky_optiscaler_live.cmd"
 STATUS_FILE = "decky_optiscaler_live.status"
 LOG_FILE = "decky_optiscaler_live.log"
@@ -43,6 +43,7 @@ BACKEND_CODES = (
     "fsr21", "fsr21_12",
     "fsr22", "fsr22_12",
     "fsr31", "fsr31_12",
+    "ffx", "ffx_12",
     "dlss", "dlssd",
 )
 
@@ -70,7 +71,7 @@ FFX_UPSCALER_MAX = FFX_FG_MAX
 
 # Only the FidelityFX backend has FSR versions to choose between; every other
 # upscaler ignores the index entirely.
-FFX_BACKENDS = ("fsr31", "fsr31_12")
+FFX_BACKENDS = ("fsr31", "fsr31_12", "ffx", "ffx_12")
 
 # Which INI key names the backend for each graphics API. The live switch can
 # only push one id into State::newBackend, and DX12 is what OptiScaler is
@@ -275,12 +276,12 @@ def remove_asi(target_dir, logger=None):
                 logger.warning("could not remove %s: %s", path, exc)
 
     # Only clean the plugins folder up if we are the ones who created it.
-    plugin_dir = Path(target_dir) / PLUGIN_SUBDIR
-    try:
-        if plugin_dir.is_dir() and not any(plugin_dir.iterdir()):
-            plugin_dir.rmdir()
-    except OSError:
-        pass
+    for folder in (Path(target_dir) / PLUGIN_SUBDIR, Path(target_dir) / SUPPORT_DIR):
+        try:
+            if folder.is_dir() and not any(folder.iterdir()):
+                folder.rmdir()
+        except OSError:
+            pass
     return {"ok": True, "removed": removed}
 
 

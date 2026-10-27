@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { readConfig, setFsr4Build, writeConfig } from "../api";
+import { enableFsr4Lite, readConfig, writeConfig } from "../api";
 import { AUTO } from "../config/values";
 import { optionsInSection } from "../config/tabs";
 import { forgetWrites, overlayWrites, rememberWrites } from "../config/writeRecord";
@@ -200,8 +200,8 @@ export function useConfig(targetDir: string | null, enabled: boolean, reloadKey?
       if (timer.current !== null) window.clearTimeout(timer.current);
       await flush();
       setSaving(true);
-      const result = await setFsr4Build(targetDir, "4.1.1b");
-      if (!result.ok) throw new Error(result.error ?? "Could not enable FSR 4.1.1b");
+      const result = await enableFsr4Lite(targetDir);
+      if (!result.ok) throw new Error(result.error ?? "Could not enable FSR 4.1.2 Lite");
       forgetWrites(targetDir);
       await load();
       setDirty(true);

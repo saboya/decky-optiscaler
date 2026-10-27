@@ -1,50 +1,52 @@
-# Steam Deck FSR 4.1.1b
+# Steam Deck FSR 4.1.2 Lite (experimental)
 
-Close the game, install OptiScaler through the plugin if needed, and select
-**FSR 4.1.1b — Steam Deck** under Basic → Override upscaler with. The first use
-requires a download (about 3.5 MB); later games reuse the verified cached DLL.
-Download or validation failure leaves the previous DLL and settings intact.
+Close the game, install OptiScaler through the plugin, and select
+**FSR 4.1.2 Lite — Steam Deck** under Basic → Override upscaler with.
 
-This option installs the community `amd_fidelityfx_upscaler_dx12.dll` from
-[the3rdparty1917/fsr4xyz 4.1.1b](https://github.com/the3rdparty1917/fsr4xyz/releases/tag/4.1.1b).
-The release describes an RDNA2 ghosting fix. Archive and DLL SHA-256 values are
-pinned in the plugin. The SDK's version resource still says 4.1.1, so Setup
-identifies the build by its bytes instead of relying on that version string.
+This fork bundles an OptiScaler **10.x nightly** (`v10.0.0-pre1`, 2026-10-27,
+commit `b19cfd29`) because 0.9.4 has no setting for the Lite model.
 
-The plugin still bundles OptiScaler runtime **0.9.4**, including the original
-SDK **4.1.1**. OptiScaler Client **1.0.7** is a separate management application;
-it is not required or installed by this plugin.
+## What the option does
 
-## Settings and verification
+- Fetches AMD's `amdxcffx64.dll` (FidelityFX 2.4.0.4370, FSR 4.1.2) from AMD's
+  Adrenalin 26.10.1 installer. Only the ~43 MB stretch of the installer that
+  holds the DLL is downloaded, decoded locally and checked against a pinned
+  SHA-256. Nothing from AMD is bundled with the plugin. The first use accepts
+  the AMD Software EULA on your behalf.
+- Puts the DLL in the game's `OptiScaler/` folder, where OptiScaler 10.x looks
+  for it, and writes `Fsr4GpuSupport=4`, `Fsr4Model=3` (INT8 Lite),
+  `UpscalerIndex=0`, `Fsr4EnableWatermark=true` and the `ffx` / `ffx_12` backends.
+- The DLL, the INI and the manifest are written as one unit and rolled back
+  together if any step fails. It refuses while the game is running.
 
-The option selects the FidelityFX backend (`fsr31` for DX12), sets
-`Fsr4ForceEnableInt8=true`, `UpscalerIndex=0`, and resets `Fsr4Update` and
-`Fsr4Preset` to `auto`. DX11/Vulkan select the existing DX12 bridge backend.
-INT8 initialization requires a fresh game launch. Per-game compatibility still
-applies; the preset cannot add upscaler inputs to an unsupported game.
+The download recipe is adapted from
+[FSR4Injector](https://github.com/Rayekkk/FSR4Injector) (BSD-3-Clause).
 
-Launch the game and use its supported upscaler input (for example XeSS in the
-Cyberpunk setup tested here). Enable the FSR watermark in OptiScaler to confirm
-`FSR4-I8`; plain FSR3 indicates fallback. Setup identifies the installed patch,
-while the watermark identifies the model actually running.
+## Verification
 
-This is experimental community support for RDNA2. Evaluate motion/ghosting,
-image quality and base frame rate in the same scene before and after enabling.
-It does not fix or enable FSR4 frame generation. You may keep FSR3 frame generation
-with FSR4 upscaling; test stability separately. Avoid modified DLLs in games whose
-anti-cheat forbids them.
+Launch the game through its supported upscaler input. The watermark is on, so it
+shows which model runs. Plain FSR3 means a fallback.
 
-## Switching back
+## Not verified
 
-Choose FSR 3.X or another upscaler in Basic settings to change the active backend.
-The community DLL stays installed for later use. To remove the patch, close the
-game and choose **Restore bundled upscaler** in Setup. This keeps settings intact;
-INT8 configured by hand or retained after restore is labelled **FSR 4 INT8 (manual)**.
+- Nobody has confirmed the Lite model on a Steam Deck (Van Gogh, RDNA 2). The
+  reports found were from RDNA 3.5 handhelds.
+- AMD's library asks Windows for the GPU family and Wine cannot answer. FSR4Injector
+  ships a stand-in `amdxc64.dll` for that; this plugin does not. OptiScaler 10.x's
+  `Fsr4GpuSupport` and `LoadCustomAmdxc64OnRdna2` may be enough, or may not.
+- Proton 11 or newer is expected to be needed.
 
-Reinstall preserves a verified community DLL. If that DLL is missing or altered,
-reinstall stops with repair instructions instead of silently replacing the patch.
-Select the Steam Deck option again to repair it, or restore the bundled DLL.
-Uninstall restores the game's original backed-up files, not the OptiScaler SDK.
+## Live control
 
-The source release and pinned hashes should be reviewed before updating to a new
-community build. Older 4.0.2 community variants are outside this feature's scope.
+The in-game ASI was regenerated against the nightly's `Config` layout, so the
+frame generation toggle should work. The features that depend on OptiScaler's
+`State` object (upscaler switching, FFX version switching, both frame rates) are
+**not ported yet** and report themselves unavailable.
+
+## Switching back / removing
+
+Choose another upscaler in Basic settings, or **Remove FSR 4.1.2 Lite** in
+Installed Files & FSR 4, which deletes AMD's DLL from the game and resets the
+model settings. Uninstall removes it as well.
+
+Avoid modified or injected DLLs in games whose anti-cheat forbids them.

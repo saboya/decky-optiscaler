@@ -191,9 +191,8 @@ async def run():
         check("multiplier labelled 2X/3X/4X",
               multiplier.get("optionLabels") == {"1": "2X", "2": "3X", "3": "4X"})
         dx12 = by_id[("Upscalers", "Dx12Upscaler")]
-        check("fsr31 documented as also serving FSR4",
-              "FSR4" in (dx12.get("optionLabels") or {}).get("fsr31", ""),
-              (dx12.get("optionLabels") or {}).get("fsr31"))
+        check("ffx is a Dx12 backend (it serves FSR 3.X and 4)",
+              "ffx" in (dx12.get("options") or []), dx12.get("options"))
 
         print("\nInstall / uninstall round trip")
         target = Path(detail["target"])
@@ -201,7 +200,8 @@ async def run():
         (target / "dxgi.dll").write_bytes(original)
         # Games that ship their own FidelityFX DLLs must get them back intact.
         game_upscaler = b"GAME'S OWN FSR31 UPSCALER" * 8
-        (target / "amd_fidelityfx_upscaler_dx12.dll").write_bytes(game_upscaler)
+        (target / "OptiScaler").mkdir(exist_ok=True)
+        (target / "OptiScaler" / "amd_fidelityfx_upscaler_dx12.dll").write_bytes(game_upscaler)
         (target / "Licenses").mkdir(exist_ok=True)
         (target / "Licenses" / "game.txt").write_text("GAME LICENSE")
 
@@ -214,10 +214,10 @@ async def run():
         stash = target / "decky_optiscaler_backup_files"
         check("backup folder created", stash.is_dir(), stash.name)
         check("game's own FidelityFX dll set aside",
-              (stash / "amd_fidelityfx_upscaler_dx12.dll").is_file())
+              (stash / "OptiScaler" / "amd_fidelityfx_upscaler_dx12.dll").is_file())
         check("game's own Licenses folder set aside", (stash / "Licenses").is_dir())
         check("OptiScaler's FidelityFX dll actually replaced it",
-              (target / "amd_fidelityfx_upscaler_dx12.dll").read_bytes() != game_upscaler)
+              (target / "OptiScaler" / "amd_fidelityfx_upscaler_dx12.dll").read_bytes() != game_upscaler)
 
         info = installer.detect(str(target))
         check("install detected", info["installed"] and info["filename"] == "dxgi.dll")
@@ -247,7 +247,7 @@ async def run():
         asi_shipped = (ROOT / "bin" / live_mod.ASI_NAME).is_file()
         if asi_shipped:
             check("live-control asi installed alongside OptiScaler",
-                  (target / "plugins" / live_mod.ASI_NAME).is_file())
+                  (target / "OptiScaler" / "plugins" / live_mod.ASI_NAME).is_file())
             ini_after = IniFile(target / "OptiScaler.ini").to_dict()
             check("OptiScaler told to load asi plugins",
                   ini_after.get("Plugins", {}).get("LoadAsiPlugins") == "true",
@@ -316,7 +316,7 @@ async def run():
               fsr4build.reaches_fsr4_by([4, 1, 1, 2740]) == "int8"
               and fsr4build.reaches_fsr4_by([4, 0, 2, 0]) == "upgrade")
         check("the released upscaler is identified by its bytes",
-              (fsr4build.identify(target / installer.FFX_UPSCALER_DLL) or {}).get("id")
+              (fsr4build.identify(target / installer.FFX_UPSCALER_PATH) or {}).get("id")
               == "bundled")
         check("a build that is not one of ours says so",
               (fsr4build.identify(source / "amdxc64.dll") or {}).get("known") is False)
@@ -340,20 +340,20 @@ async def run():
             str(target), str(await service.ensure_payload()), None
         )
         check("restoring puts the released build back",
-              restored["restored"] == installer.FFX_UPSCALER_DLL
+              restored["restored"] == installer.FFX_UPSCALER_PATH
               and (restored["build"] or {}).get("id") == "bundled", restored)
         check("and clears the record of the imported one",
               not (installer.read_manifest(target) or {}).get("fsr4_build"))
 
         print("\nConfiguration")
         config = await service.read_config(str(target))
-        check("ini parsed", config["ok"] and len(config["values"]) == 34, len(config["values"]))
+        check("ini parsed", config["ok"] and len(config["values"]) == 37, len(config["values"]))
         before = (target / "OptiScaler.ini").read_text(encoding="utf-8")
 
         write = await service.write_config(str(target), [
             {"section": "FrameGen", "key": "Enabled", "value": "true"},
             {"section": "FrameGen", "key": "FGInput", "value": "fsrfg"},
-            {"section": "Upscalers", "key": "Dx12Upscaler", "value": "fsr31"},
+            {"section": "Upscalers", "key": "Dx12Upscaler", "value": "ffx"},
             {"section": "FrameGen", "key": "FGOutput", "value": "NOT_A_VALUE"},
             {"section": "Sharpness", "key": "Sharpness", "value": "9.9"},
         ])
@@ -367,7 +367,7 @@ async def run():
         values = after_ini.to_dict()
         check("values persisted",
               values["FrameGen"]["Enabled"] == "true"
-              and values["Upscalers"]["Dx12Upscaler"] == "fsr31")
+              and values["Upscalers"]["Dx12Upscaler"] == "ffx")
         after = (target / "OptiScaler.ini").read_text(encoding="utf-8")
         check("every comment preserved",
               before.count(";") == after.count(";"),
@@ -544,18 +544,19 @@ async def run():
         check("no install remains", not installer.detect(str(target))["installed"])
         check("game folder restored to original contents",
               sorted(p.name for p in target.iterdir())
-              == ["Cyberpunk2077.exe", "Licenses", "amd_fidelityfx_upscaler_dx12.dll", "dxgi.dll"],
+              == ["Cyberpunk2077.exe", "Licenses", "OptiScaler", "dxgi.dll"],
               sorted(p.name for p in target.iterdir()))
         check("original dll byte-identical", (target / "dxgi.dll").read_bytes() == original)
         check("game's own FidelityFX dll restored byte-identical",
-              (target / "amd_fidelityfx_upscaler_dx12.dll").read_bytes() == game_upscaler)
+              (target / "OptiScaler" / "amd_fidelityfx_upscaler_dx12.dll").read_bytes()
+              == game_upscaler)
         check("game's own Licenses folder restored",
               (target / "Licenses" / "game.txt").read_text() == "GAME LICENSE")
         check("backup folder cleaned up", not stash.exists())
         check("the launch-options record goes with the install",
               not installer.detect(str(target))["launch_record"]["recorded"])
         check("imported FSR4 files removed too",
-              not (target / "amdxcffx64.dll").exists())
+              not (target / "OptiScaler" / "amdxcffx64.dll").exists())
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -615,7 +616,7 @@ def check_live_control():
         fake_asi.write_bytes(b"MZ fake")
         check("asi installs into the plugins folder",
               live.install_asi(str(target), fake_asi)["ok"]
-              and (target / "plugins" / live.ASI_NAME).is_file())
+              and (target / "OptiScaler" / "plugins" / live.ASI_NAME).is_file())
 
         result = live.apply_changes(str(target), [
             {"section": "FrameGen", "key": "Enabled", "value": "true"},
@@ -1586,9 +1587,9 @@ def check_version_pin():
     if not ref.is_file():
         return
     text = ref.read_text(encoding="utf-8")
-    check("vendored headers name the shipped OptiScaler version",
-          f"v{constants.OPTISCALER_VERSION}" in text,
-          f"want v{constants.OPTISCALER_VERSION} in SOURCE_COMMIT.txt")
+    check("vendored headers name the shipped OptiScaler commit",
+          constants.OPTISCALER_COMMIT in text,
+          f"want {constants.OPTISCALER_COMMIT} in SOURCE_COMMIT.txt")
     check("the shipped archive matches the pinned version",
           constants.OPTISCALER_VERSION in constants.PAYLOAD_ARCHIVE,
           constants.PAYLOAD_ARCHIVE)
@@ -1647,7 +1648,7 @@ def check_optipatcher():
         # LoadAsiPlugins=true. The second half is service.install's job.
         check("optipatcher lands in the plugins folder", result["ok"] and landed.is_file())
         check("it sits next to the live-control plugin",
-              landed.parent.name == live.PLUGIN_SUBDIR)
+              landed.parent.name == "plugins")
         requirements = {(r["section"], r["key"]): r["value"] for r in live.ini_requirements()}
         check("asi loading is switched on for it",
               requirements.get(("Plugins", "LoadAsiPlugins")) == "true", requirements)
@@ -2643,24 +2644,23 @@ def check_option_validation():
     # Everything else keeps the closed-set treatment: these lists are the
     # backends OptiScaler has, not a snapshot of one runtime's answer.
     dx12 = SCHEMA[("Upscalers", "Dx12Upscaler")]
-    check("a real backend id is accepted", valid(dx12, "fsr31"))
-    check("an id OptiScaler does not have is not", not valid(dx12, "fsr31_12"))
+    check("a real backend id is accepted", valid(dx12, "ffx"))
+    check("an id OptiScaler does not have is not", not valid(dx12, "not_a_backend"))
 
     # Basic mode's presets all have to survive the writer, or picking one would
     # half-apply: some keys written, others silently dropped.
     from optiscaler.schema import option as schema_option
     presets = {
-        "fsr4": [("Upscalers", "Dx12Upscaler", "fsr31"), ("Upscalers", "Dx11Upscaler", "fsr31_12"),
-                 ("Upscalers", "VulkanUpscaler", "fsr31_12"), ("FSR", "Fsr4Update", "true"),
-                 ("FSR", "UpscalerIndex", "0"), ("FSR", "Fsr4ForceEnableInt8", "false")],
-        "fsr4-int8": [("Upscalers", "Dx12Upscaler", "fsr31"),
-                      ("Upscalers", "Dx11Upscaler", "fsr31_12"),
-                      ("Upscalers", "VulkanUpscaler", "fsr31_12"),
-                      ("FSR", "Fsr4Update", "auto"), ("FSR", "Fsr4ForceEnableInt8", "true"),
-                      ("FSR", "UpscalerIndex", "0")],
-        "fsr31": [("Upscalers", "Dx12Upscaler", "fsr31"), ("Upscalers", "Dx11Upscaler", "fsr31"),
-                  ("Upscalers", "VulkanUpscaler", "fsr31"), ("FSR", "Fsr4Update", "false"),
-                  ("FSR", "UpscalerIndex", "1"), ("FSR", "Fsr4ForceEnableInt8", "false")],
+        "fsr4": [("Upscalers", "Dx12Upscaler", "ffx"), ("Upscalers", "Dx11Upscaler", "ffx_12"),
+                 ("Upscalers", "VulkanUpscaler", "ffx_12"), ("FSR", "UpscalerIndex", "0")],
+        "fsr4-lite": [("Upscalers", "Dx12Upscaler", "ffx"),
+                      ("Upscalers", "Dx11Upscaler", "ffx_12"),
+                      ("Upscalers", "VulkanUpscaler", "ffx_12"),
+                      ("FSR", "Fsr4GpuSupport", "4"), ("FSR", "Fsr4Model", "3"),
+                      ("FSR", "UpscalerIndex", "0"), ("FSR", "Fsr4Preset", "auto"),
+                      ("FSR", "Fsr4EnableWatermark", "true")],
+        "fsr31": [("Upscalers", "Dx12Upscaler", "ffx"), ("Upscalers", "Dx11Upscaler", "fsr31"),
+                  ("Upscalers", "VulkanUpscaler", "ffx"), ("FSR", "UpscalerIndex", "1")],
         "xess": [("Upscalers", "Dx12Upscaler", "xess"), ("Upscalers", "Dx11Upscaler", "xess_12"),
                  ("Upscalers", "VulkanUpscaler", "xess")],
     }

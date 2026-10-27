@@ -81,6 +81,15 @@ class Plugin:
     async def set_fsr4_build(self, target_dir: str, build_id: str) -> dict:
         return await self.service.set_fsr4_build(target_dir, build_id)
 
+    async def get_fsr4_lite(self, target_dir: str) -> dict:
+        return await self.service.get_fsr4_lite(target_dir)
+
+    async def enable_fsr4_lite(self, target_dir: str) -> dict:
+        return await self.service.enable_fsr4_lite(target_dir)
+
+    async def disable_fsr4_lite(self, target_dir: str) -> dict:
+        return await self.service.disable_fsr4_lite(target_dir)
+
     async def restore_fsr4_build(self, target_dir: str) -> dict:
         return await self.service.restore_fsr4_build(target_dir)
 
