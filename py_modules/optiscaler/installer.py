@@ -662,6 +662,64 @@ def _stash(target, path, logger=None):
     return relative.as_posix()
 
 
+def _migrate_previous_layout(target, old_files, created, backups, logger=None):
+    """Clean up what an install from an older layout left in the game folder.
+
+    Up to 0.0.7 the support DLLs sat next to the proxy and the ASI in ``plugins/``;
+    10.x keeps them in ``OptiScaler/``. The new manifest only lists the new
+    places, so without this every file the old one listed would be orphaned: still
+    next to the executable (where a stale FidelityFX DLL would be the one the game
+    loads) and invisible to uninstall.
+
+    Each stale file is removed -- the old manifest is the proof it is ours -- and
+    if it had displaced one of the game's own files, that file goes back now,
+    exactly as when the proxy name changes. FSR 4 driver DLLs the user imported
+    are moved, not removed, since they cannot be fetched again from here.
+    """
+    # Only the old *flat* layout is stale. Anything already under OptiScaler/ is
+    # this layout's -- the FSR 4.1.2 libraries, a driver DLL imported earlier --
+    # and is carried over by whoever owns it, not removed here.
+    #
+    # The proxy is not part of this either: moving it to another filename is the
+    # job of the stale-proxy handling in install(), which also puts the game's
+    # own file back, and it runs before this does.
+    stale = [name for name in old_files
+             if name not in created and name != INI_NAME
+             and name not in PROXY_FILENAMES
+             and not name.startswith(f"{SUPPORT_DIR}/")]
+    for name in stale:
+        path = target / name
+        if name in FSR4_SUPPORT_FILES and path.is_file():
+            destination = target / SUPPORT_DIR / name
+            destination.parent.mkdir(exist_ok=True)
+            shutil.move(str(path), str(destination))
+            relative = f"{SUPPORT_DIR}/{name}"
+            if relative not in created:
+                created.append(relative)
+            if logger:
+                logger.info("moved %s into %s/", name, SUPPORT_DIR)
+            continue
+        if path.is_file():
+            path.unlink()
+            if logger:
+                logger.info("removed %s left by an older layout", name)
+        if backups.pop(name, None):
+            stashed = backup_dir(target) / name
+            if stashed.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(stashed), str(path))
+                if logger:
+                    logger.info("restored the game's own %s", name)
+        # A folder only we used (plugins/) goes with its last file.
+        parent = path.parent
+        while parent != target and parent.is_dir():
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
+
 def install(target_dir, payload_root, filename=DEFAULT_PROXY, preserve_ini=True,
             logger=None, live_asi=None, optipatcher=None, reframework_files=None,
             reframework_revision=None):
@@ -806,6 +864,8 @@ def install(target_dir, payload_root, filename=DEFAULT_PROXY, preserve_ini=True,
             patcher_result["error"] = outcome.get("error")
             if logger:
                 logger.warning("optipatcher unavailable: %s", outcome.get("error"))
+
+    _migrate_previous_layout(target, old_files, created, backups, logger)
 
     # AMD's FSR 4.1.2 library, if the user chose Lite earlier: a reinstall must
     # keep it on the manifest or uninstall would leave it behind.

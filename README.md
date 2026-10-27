@@ -10,7 +10,9 @@ configures [OptiScaler](https://github.com/optiscaler/OptiScaler) per game from 
 OptiScaler's settings, with a gamepad. The ones OptiScaler can change on the fly apply to the
 running game; the rest say plainly that they take effect on the next launch.
 
-OptiScaler v0.9.4 is bundled, so installing works offline and every game gets the same build.
+OptiScaler is bundled, so installing works offline and every game gets the same build. This
+fork bundles a **10.x nightly** (10.0.0-pre1, 2026-10-27) rather than 0.9.4, for the FSR 4.1.2
+Lite model; see [About this fork](#about-this-fork).
 
 > **Unofficial.** I am an independent developer with no connection to the OptiScaler project.
 > This plugin is not made, endorsed or supported by them — it bundles their release and drives
@@ -36,13 +38,15 @@ OptiScaler v0.9.4 is bundled, so installing works offline and every game gets th
   [REFramework](https://github.com/praydog/REFramework) installed first.
 - **Basic or Advanced settings.** Basic is a handful of controls (frame generation on/off, which
   generator, 2X/3X/4X, which upscaler), each driving several INI keys at once. Advanced gives
-  you all 288 settings across 34 sections, generated from the comments in `OptiScaler.ini` so
+  you all 350 settings across 37 sections, generated from the comments in `OptiScaler.ini` so
   they match the shipped build. Edits keep every comment in the file, and names are the
   overlay's own.
-- **FSR 4.1.1b on Steam Deck.** Close the game, then choose **FSR 4.1.1b — Steam Deck**
-  in Basic settings. One selection downloads the community RDNA2 ghosting fix and enables
-  INT8 upscaling. Frame generation stays separate. See [Steam Deck FSR 4](docs/steam-deck-fsr4.md)
-  for verification, rollback, and limitations.
+- **FSR 4.1.2 Lite on Steam Deck (experimental).** Close the game, then choose
+  **FSR 4.1.2 Lite — Steam Deck** in Basic settings. One selection fetches AMD's FSR 4.1.2
+  libraries (about 75 MB, DirectX and Vulkan) from AMD's own driver package and selects the
+  INT8 Lite model made for handhelds. Frame generation stays separate. Nothing from AMD ships
+  in the plugin. See [Steam Deck FSR 4](docs/steam-deck-fsr4.md) for verification, rollback and
+  what is not verified.
 - **Changes settings while you play.** A bundled ASI plugin applies frame generation, the
   FidelityFX FG version, the upscaler and the FSR version immediately from the Quick Access
   panel — next to what the game actually ended up running and, with frame generation on, both
@@ -78,8 +82,12 @@ Grab `Decky-OptiScaler-v*.zip` from the
   **Install Plugin from URL** with the zip's download link; or
 - unpack the zip into `~/homebrew/plugins/` and restart Decky Loader.
 
-Every release bundles OptiScaler itself, so there is nothing else to download.
+Every release bundles OptiScaler itself, so there is nothing else to download. The FSR 4.1.2
+Lite option is the exception: it downloads AMD's libraries the first time you use it.
 See the [changelog](CHANGELOG.md) for what changed.
+
+A game set up by an older release is migrated in place when you reinstall: the 10.x layout
+keeps the support DLLs in an `OptiScaler/` folder, and the old files are cleaned up.
 
 ## Live in-game control
 
@@ -91,15 +99,23 @@ what lets the Quick Access panel change, mid-game:
 - **Frame generation** — `Config::FGEnabled`, read every frame.
 - **Upscaler** — the backend id into `State::newBackend`, then every entry of
   `State::changeBackend` marked. The overlay's "Change Upscaler" in full.
-- **FidelityFX FG version** — `Config::FfxFGIndex`, then `State::FGchanged` and
-  `State::SCchanged`, so the generator's context is destroyed and rebuilt on the new index. The
+- **FidelityFX FG version** — `Config::FfxFGIndex`, then `State::fgChanged` and
+  `State::scChanged`, so the generator's context is destroyed and rebuilt on the new index. The
   versions offered are the ones the SDK reported to *that* game.
 - **FSR version** — `Config::FfxUpscalerIndex` plus the same feature rebuild. One backend id
-  covers every FSR from 2.3.4 to 4.1.1, so the exact version comes from the list the running
-  game reported — the same one its overlay names in the title bar.
+  covers every FSR from 2.3.4 to 4.1.x, so the exact version comes from the list the running
+  game reported — the same one its overlay names in the title bar. OptiScaler keeps separate
+  lists for DirectX and Vulkan, and the plugin reads the one that matches the game.
 
 It also reads out both frame rates: what the game renders next to what reaches the screen, and
-says when the generator is switched on but not actually inserting frames.
+says when the generator is switched on but not actually inserting frames. Native Vulkan games
+have no frame rate: OptiScaler only counts frames in its DXGI swapchain wrapper.
+
+The plugin finds OptiScaler's `Config` and `State` objects in memory and models their layout
+from the vendored headers (`asi/optiscaler_ref/`), so it is tied to the exact build it ships
+with. `scripts/verify_state_layout.py` checks that model against the shipped `OptiScaler.dll`.
+**On this fork it has not been run in a game yet**; every lookup fails closed, so a layout that
+does not match leaves the feature reporting unavailable.
 
 ## Steam launch options
 
@@ -142,9 +158,26 @@ Tests:
 
 ```sh
 python3 scripts/selftest.py                          # backend, against a synthetic library
+python3 scripts/test_fsr4.py                         # install / FSR 4 Lite lifecycle and rollback
+python3 scripts/verify_state_layout.py               # ASI's State model vs OptiScaler.dll (needs capstone, pefile)
 HARNESS=run.tsx node testharness/build-and-run.mjs    # renders the UI headlessly
 HARNESS=all-options.tsx node testharness/build-and-run.mjs
 ```
+
+## About this fork
+
+This is a fork of [danielcamilo1/decky-optiscaler](https://github.com/danielcamilo1/decky-optiscaler)
+0.0.7, which is the project the rest of this README describes. What the fork changes:
+
+- Bundles an OptiScaler **10.x nightly** instead of 0.9.4, and follows its new layout.
+- Replaces *FSR 4.1.1b — Steam Deck* with **FSR 4.1.2 Lite**, fetched from AMD's installer.
+- Ports the live-control plugin to the nightly and adds native Vulkan support.
+
+It is a **prerelease**, versioned `0.1.0-lite.1`, and the changes above have **not been run in a
+game**: they pass the plugin's own tests, and that is all that can be said. The upstream project
+and its author are not involved and should not be asked about this fork. Report problems with it
+[here](https://github.com/saboya/decky-optiscaler/issues). The nightly is a development build and
+AMD's FSR 4.1.2 Lite is days old, so expect rough edges.
 
 ## Support
 
@@ -168,4 +201,6 @@ drive their work.
 
 ## AI disclosure
 
-This plugin was built with heavy use of AI: Claude Opus 5 was the model mainly used for its development. Every design decision, review and manual testing runs were mine, and everything here has been run on an Xbox Ally X running Bazzite.
+Upstream 0.0.7 was built with heavy use of AI: Claude Opus 5 was the model mainly used for its development. Every design decision, review and manual testing runs were the upstream author's, and that version was run on an Xbox Ally X running Bazzite.
+
+The changes in this fork were also written with an AI assistant, and — unlike upstream — have not been tested on a device.

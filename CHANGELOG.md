@@ -1,9 +1,84 @@
 # Changelog
 
 Newest first. Each release ships `Decky OptiScaler.zip` for Decky Loader's
-*Install from URL* (Developer mode), and bundles **OptiScaler 0.9.4**.
+*Install from URL* (Developer mode). 0.0.x bundles **OptiScaler 0.9.4**; 0.1.0 and
+later bundle a **10.x nightly**, named in each entry.
 
 ## [Unreleased]
+
+## [0.1.0-lite.1] - 2026-10-27
+
+**Prerelease, and not yet run in a game.** FSR 4.1.2 Lite on the Steam Deck, on
+top of an OptiScaler 10.x nightly. Everything below passes the plugin's own
+tests (494 checks and 34 lifecycle tests); none of it has been tried on a Deck.
+
+This is a fork of [danielcamilo1/decky-optiscaler](https://github.com/danielcamilo1/decky-optiscaler)
+0.0.7. See the README for what that means.
+
+### Changed
+
+- **Bundles OptiScaler 10.0.0-pre1, nightly 2026-10-27** (commit `b19cfd29`)
+  instead of 0.9.4. 0.9.4 has no setting for the Lite model. The nightly is a
+  development build; the archive's SHA-256 is pinned in the plugin.
+- **The install layout is 10.x's.** The support DLLs live in `OptiScaler/` next to
+  the proxy instead of beside it, and the live-control plugin is in
+  `OptiScaler/plugins/`. Install, uninstall, backup and restore all follow it, and
+  a game set up by 0.0.7 is migrated in place: the old files are removed, the
+  game's own FidelityFX DLL comes back where it belongs, and imported FSR 4
+  driver DLLs are moved into `OptiScaler/` rather than lost.
+- The settings schema is regenerated from the nightly's INI: 350 options across
+  37 sections (was 288 across 34). The Basic upscaler presets write `ffx` /
+  `ffx_12` and `UpscalerIndex`; `Fsr4Update` and `Fsr4ForceEnableInt8` are gone
+  from 10.x and are no longer written.
+
+### Added
+
+- **FSR 4.1.2 Lite — Steam Deck**, in the Basic upscaler dropdown, replacing
+  *FSR 4.1.1b — Steam Deck*. One choice fetches AMD's FSR 4.1.2 libraries from
+  AMD's Adrenalin 26.10.1 installer and selects the INT8 Lite model
+  (`Fsr4GpuSupport=4`, `Fsr4Model=3`, watermark on). Only the stretch of the
+  installer holding each DLL is downloaded (about 75 MB in all), decoded locally
+  and checked against pinned hashes; nothing from AMD ships in the plugin. The
+  DLLs, the INI and the manifest are written together and rolled back together,
+  and it refuses while the game is running. *Remove FSR 4.1.2 Lite* undoes it.
+  The download recipe is adapted from
+  [FSR4Injector](https://github.com/Rayekkk/FSR4Injector) (BSD-3-Clause).
+- **Native Vulkan games.** The Vulkan library (`amdvkffx64.dll`) is fetched as
+  well, native Vulkan games get `VulkanUpscaler=ffx`, and live control reads the
+  FFX version list that matches the game's graphics API, since OptiScaler keeps a
+  separate one for Vulkan and it is the one that offers the driver's FSR 4.
+- `scripts/verify_state_layout.py` checks the live-control plugin's model of
+  OptiScaler's `State` object against the shipped `OptiScaler.dll` itself, and
+  reports a miss when the layout is wrong.
+
+### Fixed
+
+- Live control works against 10.x. Its model of OptiScaler's internals was
+  written for 0.9.4: the upscaler ids became an enum, a table it used to tell
+  apart from the others was removed, and several members moved. The `Config` and
+  `State` mirrors are regenerated and ported, and every lookup still fails
+  closed, so a layout that does not match leaves a feature reporting
+  unavailable.
+
+### Known gaps
+
+- Not run in a game. In particular: that the Lite model is actually selected on a
+  Steam Deck's RDNA 2 GPU, that `VulkanUpscaler=ffx` makes a Vulkan game load
+  `amdvkffx64.dll`, and the live-control offsets, which are derived from the
+  headers and cross-checked against the binary, not observed.
+- AMD's library identifies the GPU through Windows driver data that Wine does not
+  have, so under Proton it may fall back to FSR 3. FSR4Injector ships a stand-in
+  `amdxc64.dll` for that; this plugin does not, and relies on OptiScaler 10.x's
+  `Fsr4GpuSupport` instead. If the watermark says FSR3, that is the first thing
+  to suspect.
+- Native Vulkan games have no frame rate: OptiScaler only counts frames in its
+  DXGI swapchain wrapper.
+- `Fsr4Preset` and the Vulkan FSR 4 version index are left to the game's own
+  list; the preset does not pick the driver's FSR 4 entry for you.
+- OptiPatcher and the compatibility-list seed were not re-checked against the
+  nightly.
+
+[0.1.0-lite.1]: https://github.com/saboya/decky-optiscaler/releases/tag/v0.1.0-lite.1
 
 ## [0.0.7] - 2026-09-18
 

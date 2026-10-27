@@ -2,6 +2,7 @@
 """Offline integration tests for the Deck preset's DLL/settings lifecycle."""
 import asyncio
 import hashlib
+import json
 import logging
 from pathlib import Path
 import sys
@@ -309,6 +310,82 @@ class LiteFetchTests(unittest.TestCase):
             raise AssertionError('should not download')
         path = self.fsr4lite.ensure(self.root, self.recipe, opener=boom)
         self.assertEqual(path.read_bytes(), self.payload)
+
+
+class UpgradeFromFlatLayoutTests(unittest.TestCase):
+    """A 0.0.7 install, upgraded in place by this one.
+
+    0.0.7 kept the support DLLs next to the proxy and the ASI in plugins/. The
+    new manifest only lists the OptiScaler/ paths, so without a migration every
+    file the old one listed would stay beside the executable -- where a stale
+    FidelityFX DLL is the one the game would load -- and uninstall would never
+    find it.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.game = root / 'game'
+        self.game.mkdir()
+        self.payload = root / 'payload'
+        (self.payload / 'OptiScaler').mkdir(parents=True)
+        (self.payload / 'OptiScaler.dll').write_bytes(b'OptiScaler' * 500000)
+        (self.payload / 'OptiScaler.ini').write_text('[Upscalers]\n')
+        for name in installer.PAYLOAD_FILES:
+            (self.payload / name).write_bytes(b'new')
+        self.old = ['dxgi.dll', 'OptiScaler.ini', 'amd_fidelityfx_upscaler_dx12.dll',
+                    'fakenvapi.dll', 'amdxcffx64.dll', 'plugins/decky_optiscaler_live.asi']
+        for name in self.old:
+            path = self.game / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_bytes(b'OptiScaler' * 500000 if name == 'dxgi.dll' else b'old ' + name.encode())
+        stash = self.game / 'decky_optiscaler_backup_files'
+        stash.mkdir()
+        (stash / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b"THE GAME'S OWN")
+        (self.game / MANIFEST_NAME).write_text(json.dumps({
+            'plugin': 'decky-optiscaler', 'filename': 'dxgi.dll', 'optiscaler_version': '0.9.4',
+            'files': self.old, 'dirs': [],
+            'backups': {'amd_fidelityfx_upscaler_dx12.dll': 'amd_fidelityfx_upscaler_dx12.dll'},
+            'backup_dir': 'decky_optiscaler_backup_files'}))
+
+    def files(self):
+        return sorted(str(p.relative_to(self.game)) for p in self.game.rglob('*') if p.is_file())
+
+    def test_old_layout_files_are_removed_and_the_games_own_dll_comes_back(self):
+        installer.install(self.game, self.payload, 'dxgi.dll')
+        files = self.files()
+        for stale in ('fakenvapi.dll', 'plugins/decky_optiscaler_live.asi'):
+            self.assertNotIn(stale, files)
+        self.assertFalse((self.game / 'plugins').exists())
+        # The file 0.0.7 had put in the game's folder was OptiScaler's; the game's
+        # own, which it had stashed, is back where the game expects it.
+        self.assertEqual((self.game / 'amd_fidelityfx_upscaler_dx12.dll').read_bytes(),
+                         b"THE GAME'S OWN")
+        self.assertNotIn('decky_optiscaler_backup_files/amd_fidelityfx_upscaler_dx12.dll', files)
+
+    def test_imported_driver_dlls_are_moved_not_lost(self):
+        installer.install(self.game, self.payload, 'dxgi.dll')
+        self.assertFalse((self.game / 'amdxcffx64.dll').exists())
+        self.assertEqual((self.game / 'OptiScaler' / 'amdxcffx64.dll').read_bytes(),
+                         b'old amdxcffx64.dll')
+        self.assertIn('OptiScaler/amdxcffx64.dll', installer.read_manifest(self.game)['files'])
+
+    def test_switching_the_proxy_name_during_an_upgrade_still_restores_the_games_dll(self):
+        # The proxy is handled by install()'s own stale-proxy step; the migration
+        # must not delete it first.
+        (self.game / 'decky_optiscaler_backup_files' / 'dxgi.dll').write_bytes(b"GAME'S DXGI")
+        manifest = installer.read_manifest(self.game)
+        manifest['backups']['dxgi.dll'] = 'dxgi.dll'
+        (self.game / MANIFEST_NAME).write_text(json.dumps(manifest))
+        installer.install(self.game, self.payload, 'winmm.dll')
+        self.assertEqual((self.game / 'dxgi.dll').read_bytes(), b"GAME'S DXGI")
+        self.assertTrue((self.game / 'winmm.dll').is_file())
+
+    def test_uninstall_after_the_upgrade_leaves_only_the_games_own_files(self):
+        installer.install(self.game, self.payload, 'dxgi.dll')
+        installer.uninstall(self.game)
+        self.assertEqual(self.files(), ['amd_fidelityfx_upscaler_dx12.dll'])
 
 
 class LiteRecipeTests(unittest.TestCase):
