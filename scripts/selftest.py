@@ -1930,6 +1930,30 @@ def check_asi_state_layout():
     ):
         check(f"live.cpp pins {why}", f"static_assert({text}," in source, text)
 
+    # scripts/verify_state_layout.py checks these same offsets against the
+    # shipped OptiScaler.dll. Its table has to be the mirror's, or passing it
+    # says nothing about live.cpp.
+    verify = (ROOT / "scripts" / "verify_state_layout.py").read_text(encoding="utf-8")
+    table = re.findall(r'^\s+\("([\w.]+)", (\d+), "(\w+)"\),$', verify, re.M)
+    check("verify_state_layout.py has a table of members to check", len(table) >= 10, len(table))
+    unpinned = []
+    for name, rel, _kind in table:
+        # A version list's first member is the list, so ".names" is pinned as the
+        # struct itself.
+        member = name[:-len(".names")] if name.endswith(".names") else name
+        asserted = re.search(
+            r"static_assert\(offsetof\(state_tail, %s\) == (\d+)" % re.escape(member), source)
+        if asserted:
+            check(f"verify_state_layout.py expects {name} where live.cpp pins it",
+                  int(asserted.group(1)) == int(rel), (asserted.group(1), rel))
+        else:
+            unpinned.append(name)
+    # newBackend, lastMipBias and lastMipBiasMax are not pinned on their own: the
+    # first is pinned as sizeof(ud_table), the other two follow xessDebugFrames.
+    check("every other member in that table is one live.cpp pins some other way",
+          set(unpinned) <= {"newBackend", "lastMipBias", "lastMipBiasMax", "presentFrameTime"},
+          unpinned)
+
     # The flags are written, so identification has to be unambiguous or refused.
     check("an ambiguous table means the flags stay unlocated",
           "if (matches != 1) {" in source, "FindCapturedHudlesses")

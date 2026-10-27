@@ -814,6 +814,9 @@ struct state_tail {
     msvc_vector_raw detailedGpuTimes;
     double lastFGFrameTime;
     double presentFrameTime;
+    double lastFGPresentMs;
+    unsigned char frameTimeMutex[80];  // std::mutex
+    bool postDone;
 };
 
 static_assert(offsetof(state_tail, newBackend) == sizeof(ud_table),
@@ -828,6 +831,12 @@ static_assert(offsetof(state_tail, ffxUpscalerVersionsDx12.ids) ==
                   offsetof(state_tail, ffxUpscalerVersionsDx12.names) + sizeof(msvc_vector_raw),
               "each version list declares its ids straight after its names");
 static_assert(offsetof(state_tail, lastFGFrameTime) == 592, "unexpected State tail layout");
+static_assert(offsetof(state_tail, WAR_xefgRequestFGToggle) == 84, "unexpected State tail layout");
+static_assert(offsetof(state_tail, xefgDynamicCapFps) == 88, "unexpected State tail layout");
+static_assert(offsetof(state_tail, dlssgLastSetMode) == 96, "unexpected State tail layout");
+static_assert(offsetof(state_tail, lastFGPresentMs) == 608, "unexpected State tail layout");
+static_assert(offsetof(state_tail, postDone) == 696,
+              "two mutexes and two deques in front of postDone, so it pins both sizes");
 static_assert(offsetof(state_tail, presentFrameTime) ==
                   offsetof(state_tail, lastFGFrameTime) + sizeof(double),
               "the present interval is declared straight after the rendered one");

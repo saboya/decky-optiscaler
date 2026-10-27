@@ -32,17 +32,29 @@ state_tail) are ported to this commit's State.h. What changed since v0.9.4:
     room in the object.
 
 Two sizes cannot be read from the headers because they are MSVC standard
-library internals: std::mutex (80 bytes) and std::deque (40 bytes). They were
-chosen by testing candidate layouts against the shipped OptiScaler.dll:
-State::Instance() is the function at RVA 0x2c7e0, and the code that calls it and
-then touches [rax+offset] gives 187 distinct offsets to compare a layout with.
-The six mutex/deque combinations tried scored 36-40 of 45 sampled members; 80/40
-scored best (40) and is the only one under which both frame-interval slots
-(+0x878, +0x880) are touched by the code. Five members still show no access under
-it -- three of them (WAR_xefgRequestFGToggle, xefgDynamicCapFps, dlssgLastSetMode)
-sit *before* either mutex or deque, so they do not depend on those sizes, and
-the reason they are never seen was not established. That is weaker evidence than
-a debugger would give. A different OptiScaler build means doing this again.
+library internals: std::mutex (80 bytes) and std::deque (40 bytes). They are
+checked against the shipped OptiScaler.dll by scripts/verify_state_layout.py:
+
+  * State::Instance() is the function at RVA 0x2c7e0. The constructor is found by
+    its `lastMipBias = 100.0f; lastMipBiasMax = -100.0f` initialisers, which also
+    fixes where changeBackend is (+0x628).
+  * Every `[reg + disp]` memory operand in .text inside State's range is
+    collected -- through ANY register. The first attempt looked only at [rax]
+    within a few instructions of a call to Instance(), which is how five members
+    came to look "never accessed": the compiler had moved State& into r14/r15/
+    rbx/rsi and used it from there. WAR_xefgRequestFGToggle, xefgDynamicCapFps,
+    dlssgLastSetMode, lastFGPresentMs and postDone all have accesses of the
+    right width at the computed offsets (e.g. `mov byte [r15+0x67c], 1`,
+    `movss [r8+0x680], xmm6`, `cmp dword [r15+0x688], 3`, `movsd [r15+0x888],
+    xmm0`, `cmp byte [rsi+0x8e0], 0`).
+  * 13 of 13 checked members pass. The check can fail: with the deque taken as
+    32 or 48 bytes, or the first mutex as 72, a double or the last member lands
+    where nothing accesses it and the script reports MISS.
+
+That is evidence, not proof -- an access of the right width at the right offset
+is what a correct layout produces, not the only thing that could. Members that
+are only touched through helpers would not show up, and the script makes no
+claim about those. A different OptiScaler build means running it again.
 
 NOT VERIFIED AT RUN TIME: none of this has been executed inside a game. Every
 lookup fails closed -- a State that does not match leaves the feature reporting
