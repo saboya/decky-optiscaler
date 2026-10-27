@@ -291,8 +291,8 @@ static Config* FindConfig(HMODULE opti) {
 // ------------------------------------------------------------- State lookup --
 
 // State is a function-local static, so it lives in OptiScaler's data section
-// rather than the heap, and its first three members are std::strings holding
-// the running executable's filename, the detected game name and its version.
+// rather than the heap, and it opens with std::string gameExe, std::string
+// gameName, a steady_clock time_point (one int64) and std::string gameVersion.
 // The executable filename is something this plugin can compute for itself, so
 // that string is the anchor.
 
@@ -300,6 +300,20 @@ struct StateLoc {
     unsigned char* base;
     size_t window;
 };
+
+/** State's leading members, from the vendored State.h (10.x). */
+struct state_head {
+    msvc_string gameExe;
+    msvc_string gameName;
+    int64_t startTime;  // std::chrono::steady_clock::time_point
+    msvc_string gameVersion;
+};
+
+static_assert(offsetof(state_head, gameName) == 32, "gameName follows gameExe");
+static_assert(offsetof(state_head, gameVersion) == 72,
+              "gameVersion follows gameName and the 8-byte start time");
+
+#define STATE_WINDOW_MAX 8192
 
 static bool FindState(HMODULE opti, const char* exeName, StateLoc* out) {
     ScopedScanCache cache;
@@ -309,19 +323,21 @@ static bool FindState(HMODULE opti, const char* exeName, StateLoc* out) {
         unsigned char* p = sections[s].base;
         unsigned char* end = p + sections[s].size;
         p = (unsigned char*) (((uintptr_t) p + 7) & ~(uintptr_t) 7);
-        for (; p + sizeof(msvc_string) * 3 <= end; p += 8) {
+        for (; p + sizeof(state_head) <= end; p += 8) {
             char name[MAX_PATH];
             if (!ReadStdString((const msvc_string*) p, name, sizeof(name))) continue;
             if (_stricmp(name, exeName) != 0) continue;
             // gameName and gameVersion must at least decode as strings.
             char scratch[MAX_PATH];
-            if (!ReadStdString((const msvc_string*) (p + sizeof(msvc_string)), scratch, sizeof(scratch)))
+            if (!ReadStdString((const msvc_string*) (p + offsetof(state_head, gameName)),
+                               scratch, sizeof(scratch)))
                 continue;
-            if (!ReadStdString((const msvc_string*) (p + sizeof(msvc_string) * 2), scratch, sizeof(scratch)))
+            if (!ReadStdString((const msvc_string*) (p + offsetof(state_head, gameVersion)),
+                               scratch, sizeof(scratch)))
                 continue;
             out->base = p;
             out->window = (size_t) (end - p);
-            if (out->window > 8192) out->window = 8192;
+            if (out->window > STATE_WINDOW_MAX) out->window = STATE_WINDOW_MAX;
             return true;
         }
     }
@@ -405,7 +421,7 @@ static_assert(sizeof(ud_table) == 64, "the table must be 64 bytes for newBackend
 
 struct BackendMap {
     ud_table* table;
-    msvc_string* newBackend;  // State::newBackend, declared right after the map
+    uint32_t* newBackend;  // State::newBackend, declared right after the map
 };
 
 /** How many buckets a given shift count means; the table's calc_num_buckets. */
@@ -434,32 +450,67 @@ static bool VectorOfStride(const msvc_vector_raw* v, size_t stride, size_t* coun
     return true;
 }
 
-// The backend ids OptiScaler accepts (OptiScaler/menu/menu_common.cpp, the
-// AddDx11/Dx12/VulkanBackends combos).
-static const char* kBackendCodes[] = { "xess",  "xess_12", "fsr21", "fsr21_12", "fsr22",
-                                       "fsr22_12", "fsr31", "fsr31_12", "ffx", "ffx_12", "dlss", "dlssd" };
+// The backend ids OptiScaler accepts, and the Upscaler enum value each one is.
+// In 0.9.4 these were strings in Config and State; since then both hold the enum
+// (OptiScaler/OptiTypes.h), in this order, with Reset -- "nothing pending" --
+// last. The string form is still what the host sends, as it is what the INI
+// holds; OptiTypes.cpp's CodeToUpscaler is the mapping reproduced here.
+enum UpscalerId : int32_t {
+    UP_XESS = 0, UP_XESS_ON12, UP_FSR21, UP_FSR21_ON12, UP_FSR22, UP_FSR22_ON12,
+    UP_FSR31, UP_FFX, UP_FFX_ON12, UP_DLSS, UP_DLSS_ON12, UP_DLSSD, UP_RESET
+};
 
-static bool IsBackendCode(const char* code) {
+struct BackendCode {
+    const char* code;
+    int32_t id;
+};
+
+static const BackendCode kBackendCodes[] = {
+    { "xess", UP_XESS },       { "xess_12", UP_XESS_ON12 },
+    { "fsr21", UP_FSR21 },     { "fsr21_12", UP_FSR21_ON12 },
+    { "fsr22", UP_FSR22 },     { "fsr22_12", UP_FSR22_ON12 },
+    { "fsr31", UP_FSR31 },     { "ffx", UP_FFX },
+    { "ffx_12", UP_FFX_ON12 }, { "dlss", UP_DLSS },
+    { "dlss_12", UP_DLSS_ON12 }, { "dlssd", UP_DLSSD },
+    // "for compat reasons", upstream: the old id for the FFX-on-DX12 backend.
+    { "fsr31_12", UP_FFX_ON12 },
+};
+
+/** The enum value for a backend id, or -1 for one OptiScaler does not have. */
+static int32_t BackendId(const char* code) {
     for (size_t i = 0; i < sizeof(kBackendCodes) / sizeof(kBackendCodes[0]); i++)
-        if (strcmp(kBackendCodes[i], code) == 0) return true;
-    return false;
+        if (strcmp(kBackendCodes[i].code, code) == 0) return kBackendCodes[i].id;
+    return -1;
+}
+
+/** The name of an enum value, for reporting; empty for Reset and anything unknown. */
+static const char* BackendName(int32_t id) {
+    // Reverse lookup prefers the canonical id over the compat alias above.
+    for (size_t i = 0; i < sizeof(kBackendCodes) / sizeof(kBackendCodes[0]); i++)
+        if (kBackendCodes[i].id == id && strcmp(kBackendCodes[i].code, "fsr31_12") != 0)
+            return kBackendCodes[i].code;
+    return "";
 }
 
 /**
- * Whether the string one table past a candidate really is State::newBackend.
+ * Whether the enum one table past a candidate really is State::newBackend.
  *
- * This is the check that separates changeBackend from the two other
- * unordered_dense maps State holds (DeviceAdapterNames and CapturedHudlesses),
- * which are identical as tables and differ only in what follows them.
- * OptiScaler leaves this string empty between switches and otherwise puts one
- * of its own backend ids in it, and it is short enough never to leave the small
- * string buffer -- so the capacity is the inline one.
+ * This is the check that separates changeBackend from State's other
+ * unordered_dense map (capturedHudlesses), which is identical as a table and
+ * differs only in what follows it. OptiScaler leaves newBackend at Reset
+ * between switches and otherwise puts one of the enum's values in it; a
+ * pointer-sized table of resources is followed by a bool and then an application
+ * id, which is never a small enum value.
+ *
+ * Reset is the resting state, so a healthy process almost always shows exactly
+ * that: the check is weak on its own. What actually identifies changeBackend is
+ * FindChangeBackend taking the first table that passes every invariant *after*
+ * capturedHudlesses, whose tail is distinctive; this only has to rule out a
+ * value that cannot be an Upscaler at all.
  */
-static bool LooksLikeNewBackend(const msvc_string* s) {
-    char text[64];
-    if (!ReadStdString(s, text, sizeof(text))) return false;
-    if (s->capacity < 15) return false;
-    return text[0] == 0 || IsBackendCode(text);
+static bool LooksLikeNewBackend(const uint32_t* value) {
+    if (!Readable(value, sizeof(uint32_t))) return false;
+    return *value <= (uint32_t) UP_RESET;
 }
 
 /**
@@ -517,59 +568,100 @@ static bool TableInvariantsHold(const ud_table* t, size_t valueStride, size_t ma
 
 /** Full validation of one candidate address as State::changeBackend. */
 static bool LooksLikeChangeBackend(const ud_table* t) {
-    if (!Readable(t, sizeof(ud_table) + sizeof(msvc_string))) return false;
+    if (!Readable(t, sizeof(ud_table) + sizeof(uint32_t))) return false;
 
     size_t count = 0;
     if (!TableInvariantsHold(t, sizeof(backend_entry), 256, &count)) return false;
     if (count && !EntriesLookLikePairs(&t->m_values, count)) return false;
 
-    return LooksLikeNewBackend((const msvc_string*) (t + 1));
+    return LooksLikeNewBackend((const uint32_t*) (t + 1));
+}
+
+static bool LooksLikeCapturedHudlesses(const ud_table* t);
+
+/**
+ * Locate State::capturedHudlesses: the one table in State whose tail is a bool,
+ * an application id, a wstring and a string, at the exact offsets the compiler
+ * computed. Exactly one candidate has to match -- two would mean the evidence
+ * does not identify it, and the flags next to it get written to.
+ */
+static const ud_table* FindCapturedHudlesses(const StateLoc* state) {
+    if (!state->base) return NULL;
+    ScopedScanCache cache;
+    unsigned char* first = state->base + sizeof(state_head);
+    unsigned char* last = state->base + state->window;
+    const ud_table* found = NULL;
+    int matches = 0;
+    for (unsigned char* p = first; p + sizeof(ud_table) <= last; p += 8) {
+        if (!LooksLikeCapturedHudlesses((const ud_table*) p)) continue;
+        found = (const ud_table*) p;
+        matches++;
+    }
+    if (matches != 1) {
+        if (matches)
+            LogLine("capturedHudlesses is ambiguous (%d candidates); State stays unlocated",
+                    matches);
+        return NULL;
+    }
+    return found;
 }
 
 /**
  * Locate State::changeBackend, and with it State::newBackend.
  *
- * State holds three unordered_dense maps -- DeviceAdapterNames,
- * CapturedHudlesses and changeBackend, in that declaration order -- and they
- * are indistinguishable as tables. What tells them apart is what follows:
- * only changeBackend is followed by a std::string holding a backend id. That,
- * plus keeping the last candidate to break a tie in declaration order, is
- * enough; every check fails closed, so a State this does not recognise leaves
- * upscaler switching reported as unavailable rather than writing blind.
+ * In 10.x State holds two unordered_dense maps -- capturedHudlesses and
+ * changeBackend, in that declaration order -- and they are indistinguishable as
+ * tables. (0.9.x had a third, and told them apart by the std::string after
+ * changeBackend; newBackend is an enum now, and a bool followed by padding reads
+ * as a small enum just as well, so that no longer discriminates.) What does
+ * is order: capturedHudlesses has a distinctive tail and is found first, and
+ * changeBackend is the next table that passes every invariant after it. Every
+ * check fails closed, so a State this does not recognise leaves upscaler
+ * switching reported as unavailable rather than writing blind.
  */
 static bool FindChangeBackend(const StateLoc* state, BackendMap* out) {
-    unsigned char* p = state->base;
-    unsigned char* end = p + state->window;
-    bool found = false;
-    for (; p + sizeof(ud_table) + sizeof(msvc_string) <= end; p += 8) {
+    const ud_table* captured = FindCapturedHudlesses(state);
+    if (!captured) return false;
+    unsigned char* p = (unsigned char*) (captured + 1);
+    unsigned char* end = state->base + state->window;
+    for (; p + sizeof(ud_table) + sizeof(uint32_t) <= end; p += 8) {
         ud_table* candidate = (ud_table*) p;
         if (!LooksLikeChangeBackend(candidate)) continue;
         out->table = candidate;
-        out->newBackend = (msvc_string*) (candidate + 1);
-        found = true;
-    }
-    if (found)
+        out->newBackend = (uint32_t*) (candidate + 1);
         LogLine("changeBackend at +%lu of State, newBackend at +%lu",
                 (unsigned long) ((unsigned char*) out->table - state->base),
                 (unsigned long) ((unsigned char*) out->newBackend - state->base));
-    return found;
+        return true;
+    }
+    return false;
 }
 
 // -------------------------------------------------------- frame counter --
 
 /**
- * State::frameCount is declared immediately before State::changeBackend, so it
- * is the eight bytes in front of the map already located. Sampling it between
- * heartbeats is how this plugin reports frame rate without being in the render
- * loop itself.
+ * State::frameCount is declared before State::changeBackend with a bool, a bool
+ * and a uint32 between them (vkAntiLagSupported, amdFlipMeterCreated,
+ * amdFlipMeterMode), so it is the eight bytes sixteen in front of the map
+ * already located. Sampling it between heartbeats is how this plugin reports
+ * frame rate without being in the render loop itself.
  *
  * A wrong guess here is harmless-but-useless rather than dangerous: the counter
  * is only ever read, never written, and a candidate that runs backwards or
- * absurdly fast is rejected.
+ * absurdly fast is rejected -- and SearchFrameCounter looks for a real one if
+ * this never moves.
  */
+struct state_frame_head {
+    uint64_t frameCount;
+    bool vkAntiLagSupported;
+    bool amdFlipMeterCreated;
+    uint32_t amdFlipMeterMode;
+};
+static_assert(sizeof(state_frame_head) == 16, "frameCount is 16 bytes in front of changeBackend");
+
 static uint64_t* FindFrameCount(const BackendMap* map) {
     if (!map->table) return NULL;
-    uint64_t* candidate = (uint64_t*) ((unsigned char*) map->table - 8);
+    uint64_t* candidate = (uint64_t*) ((unsigned char*) map->table - sizeof(state_frame_head));
     if (!Readable(candidate, sizeof(uint64_t))) return NULL;
     return candidate;
 }
@@ -603,18 +695,6 @@ static uint64_t* FindFrameCount(const BackendMap* map) {
 // switch reports itself unavailable rather than writing a byte into State on
 // the strength of a guess.
 
-/** State's first members, which put DeviceAdapterNames at a computed offset. */
-struct state_head {
-    msvc_string GameExe;
-    msvc_string GameName;
-    msvc_string GameVersion;
-    uint32_t GameEngine;  // GameEngineType
-    ud_table DeviceAdapterNames;
-};
-
-static_assert(offsetof(state_head, DeviceAdapterNames) == 104,
-              "State's three leading strings and its engine enum put the first map at +104");
-
 /** std::pair<void*, CapturedHudlessInfo>, the element CapturedHudlesses holds. */
 struct hudless_entry {
     void* key;
@@ -627,64 +707,75 @@ struct hudless_entry {
 static_assert(sizeof(hudless_entry) == 24, "captured_hudless_info pairs are 24 bytes");
 
 /**
- * State, from the frame-generation bools through the members that identify
- * CapturedHudlesses.
+ * State, from the frame-generation flags through the members that identify
+ * capturedHudlesses (10.x: DeviceAdapterNames is gone, so this is the only
+ * table in front of changeBackend).
  *
  * Declaration order is layout order, so mirroring the run gives the compiler
- * everything it needs to say how far in front of the table FGchanged sits.
- * Every type in the run is one this plugin knows the exact size of; nothing
- * here is measured by hand.
+ * everything it needs to say how far in front of the table fgChanged sits.
+ * `skipHeapCapture` is `inline static thread_local` upstream and takes no space
+ * in the object, so it is not mirrored.
  */
 struct state_fg_block {
-    bool FGPresentIsCalled;
-    bool FGonlyGenerated;
-    bool FGHudlessCompare;
-    bool FGchanged;
-    bool SCchanged;
-    bool skipHeapCapture;
-    bool FGcaptureResources;
-    size_t FGcapturedResourceCount;
-    bool FGresetCapturedResources;
-    bool FGonlyUseCapturedResources;
-    bool FSRFGFTPchanged;
-    bool FSRFGInputActive;
-    bool FGResizing;
-    ud_table CapturedHudlesses;
-    bool ClearCapturedHudlesses;
+    bool fgOnlyGenerated;
+    bool fgHudlessCompare;
+    bool fgChanged;
+    bool scChanged;
+    bool fgCaptureResources;
+    size_t fgCapturedResourceCount;
+    bool fgResetCapturedResources;
+    bool fgOnlyUseCapturedResources;
+    bool fsrfgFramePaceTuningChanged;
+    bool fsrfgInputActive;
+    ud_table capturedHudlesses;
+    bool clearCapturedHudlesses;
     uint64_t NVNGX_ApplicationId;
     msvc_wstring NVNGX_ApplicationDataPath;
     msvc_string NVNGX_ProjectId;
 };
 
 /** Where a member of that run sits relative to the table this plugin can find. */
-#define FG_BLOCK_OFF(member)                             \
-    ((ptrdiff_t) offsetof(state_fg_block, member) -      \
-     (ptrdiff_t) offsetof(state_fg_block, CapturedHudlesses))
+#define FG_BLOCK_OFF(member)                              \
+    ((ptrdiff_t) offsetof(state_fg_block, member) -       \
+     (ptrdiff_t) offsetof(state_fg_block, capturedHudlesses))
 
-static_assert(FG_BLOCK_OFF(FGchanged) == -21, "FGchanged is 21 bytes in front of the table");
-static_assert(FG_BLOCK_OFF(SCchanged) == -20, "SCchanged is declared straight after FGchanged");
-static_assert(FG_BLOCK_OFF(ClearCapturedHudlesses) == 64, "the bool follows the table");
+static_assert(FG_BLOCK_OFF(fgChanged) == -22, "fgChanged is 22 bytes in front of the table");
+static_assert(FG_BLOCK_OFF(scChanged) == -21, "scChanged is declared straight after fgChanged");
+static_assert(FG_BLOCK_OFF(clearCapturedHudlesses) == 64, "the bool follows the table");
 static_assert(FG_BLOCK_OFF(NVNGX_ApplicationId) == 72, "the application id confirms the table");
+
+/** std::vector<const char*> names and std::vector<uint64_t> ids, as State::FfxVersionList. */
+struct ffx_version_list {
+    msvc_vector_raw names;
+    msvc_vector_raw ids;
+};
 
 /**
  * State, from changeBackend to the frame times OptiScaler keeps for its own
- * overlay. Same trick as above, in the other direction: every type in the run
- * is fixed width, so everything in it is at an offset the compiler computes
- * from the map rather than one this plugin goes looking for.
+ * overlay. Everything in the run is fixed width, so everything in it is at an
+ * offset the compiler computes from the map rather than one this plugin goes
+ * looking for.
  *
- * The run reaches three things: the two FFX version lists (which turn an index
- * into a name), and the pair of frame-interval measurements that separate the
- * rendered frame rate from the presented one.
+ * The two sizes this cannot read off the header are std::mutex and
+ * std::deque, which are MSVC standard-library internals. They are 80 and 40
+ * bytes in the build this ships with, which is what the offsets of OptiScaler's
+ * own machine code say (see SOURCE_COMMIT.txt); both are checked again at run
+ * time, because getting either wrong shifts everything after it.
  */
 struct state_tail {
     ud_table changeBackend;
-    msvc_string newBackend;
+    uint32_t newBackend;  // Upscaler, an enum class since 0.9.4
     bool xessDebug;
     int32_t xessDebugFrames;
     float lastMipBias;
     float lastMipBiasMax;
-    int32_t xefgMaxInterpolationCount;
     bool WAR_xefgRequestFGToggle;
+    float xefgDynamicCapFps;
+    bool dlssgGameDMFGSupported;
+    uint32_t dlssgLastSetMode;  // sl::DLSSGMode
+    int32_t dlssgDetectedInterpolationCount;
+    bool dlssgInputGameEnabled;
+    int32_t dlssgInputGameInterpolationCount;
     bool dlssPresetsOverriddenExternally;
     bool dlssPresetsOverridenByOpti;
     uint32_t dlssRenderPresetExternal;
@@ -703,45 +794,40 @@ struct state_tail {
     uint32_t dlssdRenderPresetBalanced;
     uint32_t dlssdRenderPresetPerformance;
     uint32_t dlssdRenderPresetUltraPerformance;
-    bool skipSpoofing;
     bool skipDxgiLoadChecks;
     bool skipParentWrapping;
     msvc_vector_raw detectedQuirks;
-    msvc_vector_raw ffxUpscalerVersionNames;
-    msvc_vector_raw ffxUpscalerVersionIds;
+    msvc_vector_raw loadedAsiPlugins;
+    unsigned char loadedAsiPluginsMutex[80];  // std::mutex
+    ffx_version_list ffxUpscalerVersionsDx12;
+    ffx_version_list ffxUpscalerVersionsVk;
     msvc_vector_raw ffxFGVersionNames;
     msvc_vector_raw ffxFGVersionIds;
     msvc_optional<uint32_t> currentFsr4Preset;
     bool isRunningOnLinux;
-    bool isRunningOnDXVK;
-    bool isRunningOnNvidia;
-    msvc_optional<bool> isRunningOnRDNA4;
-    msvc_optional<bool> isRunningOnRDNA3;
-    bool isPascalOrOlder;
     uint32_t workingMode;  // WorkingMode
     bool vulkanCreatingSC;
-    bool creatingD3DDevice;
     bool vulkanSkipHooks;
     void* VulkanInstance;  // VkInstance, an opaque handle
-    msvc_deque_raw upscaleTimes;
-    msvc_deque_raw frameTimes;
+    unsigned char upscaleTimes[40];  // std::deque<double>
+    unsigned char frameTimes[40];    // std::deque<double>
+    msvc_vector_raw detailedGpuTimes;
     double lastFGFrameTime;
     double presentFrameTime;
 };
 
 static_assert(offsetof(state_tail, newBackend) == sizeof(ud_table),
-              "the string this plugin already validates must still follow the map");
-static_assert(offsetof(state_tail, ffxUpscalerVersionNames) == 208,
-              "unexpected State tail layout");
-static_assert(offsetof(state_tail, ffxFGVersionNames) == 256, "unexpected State tail layout");
+              "the enum this plugin validates must still follow the map");
+static_assert(offsetof(state_tail, xessDebugFrames) == 72, "unexpected State tail layout");
+static_assert(offsetof(state_tail, ffxUpscalerVersionsDx12) == 312, "unexpected State tail layout");
+static_assert(offsetof(state_tail, ffxFGVersionNames) == 408, "unexpected State tail layout");
 static_assert(offsetof(state_tail, ffxFGVersionIds) ==
                   offsetof(state_tail, ffxFGVersionNames) + sizeof(msvc_vector_raw),
               "the ids vector is declared straight after the names vector");
-static_assert(offsetof(state_tail, ffxUpscalerVersionIds) ==
-                  offsetof(state_tail, ffxUpscalerVersionNames) + sizeof(msvc_vector_raw),
-              "the upscaler ids vector is declared straight after its names vector");
-static_assert(sizeof(msvc_deque_raw) == 32, "MSVC's deque is four words");
-static_assert(offsetof(state_tail, lastFGFrameTime) == 400, "unexpected State tail layout");
+static_assert(offsetof(state_tail, ffxUpscalerVersionsDx12.ids) ==
+                  offsetof(state_tail, ffxUpscalerVersionsDx12.names) + sizeof(msvc_vector_raw),
+              "each version list declares its ids straight after its names");
+static_assert(offsetof(state_tail, lastFGFrameTime) == 592, "unexpected State tail layout");
 static_assert(offsetof(state_tail, presentFrameTime) ==
                   offsetof(state_tail, lastFGFrameTime) + sizeof(double),
               "the present interval is declared straight after the rendered one");
@@ -787,8 +873,8 @@ static bool LooksLikeCapturedHudlesses(const ud_table* t) {
     }
 
     const unsigned char* at = (const unsigned char*) t;
-    if (!Readable(at + FG_BLOCK_OFF(ClearCapturedHudlesses), 1)) return false;
-    if (at[FG_BLOCK_OFF(ClearCapturedHudlesses)] > 1) return false;
+    if (!Readable(at + FG_BLOCK_OFF(clearCapturedHudlesses), 1)) return false;
+    if (at[FG_BLOCK_OFF(clearCapturedHudlesses)] > 1) return false;
 
     const uint64_t* appId = (const uint64_t*) (at + FG_BLOCK_OFF(NVNGX_ApplicationId));
     if (!Readable(appId, sizeof(*appId))) return false;
@@ -800,44 +886,22 @@ static bool LooksLikeCapturedHudlesses(const ud_table* t) {
 }
 
 /**
- * Locate State::FGchanged and State::SCchanged.
- *
- * Bounded on both sides by objects already identified: the search starts past
- * DeviceAdapterNames, whose offset the compiler knows, and stops at
- * changeBackend, which the scan above found. Exactly one candidate has to
- * match -- two would mean the evidence does not identify the table, and this
- * writes into State, so ambiguity is a refusal rather than a coin toss.
+ * Locate State::fgChanged and State::scChanged, 22 and 21 bytes in front of
+ * capturedHudlesses. Identification is FindCapturedHudlesses's job, and it
+ * refuses ambiguity; this only checks that the two bytes are bools and writable.
  */
-static bool FindFgFlags(const StateLoc* state, const BackendMap* map, FgFlags* out) {
-    if (!state->base || !map->table) return false;
-    ScopedScanCache cache;
-    unsigned char* first =
-        state->base + offsetof(state_head, DeviceAdapterNames) + sizeof(ud_table);
-    unsigned char* last = (unsigned char*) map->table;
-    if (last <= first) return false;
-
-    unsigned char* found = NULL;
-    int matches = 0;
-    for (unsigned char* p = first; p + sizeof(ud_table) <= last; p += 8) {
-        if (!LooksLikeCapturedHudlesses((const ud_table*) p)) continue;
-        found = p;
-        matches++;
-    }
-    if (matches != 1) {
-        if (matches)
-            LogLine("CapturedHudlesses is ambiguous (%d candidates); FG flags stay unlocated",
-                    matches);
-        return false;
-    }
-
-    unsigned char* fg = found + FG_BLOCK_OFF(FGchanged);
-    unsigned char* sc = found + FG_BLOCK_OFF(SCchanged);
+static bool FindFgFlags(const StateLoc* state, const BackendMap*, FgFlags* out) {
+    const ud_table* captured = FindCapturedHudlesses(state);
+    if (!captured) return false;
+    unsigned char* found = (unsigned char*) captured;
+    unsigned char* fg = found + FG_BLOCK_OFF(fgChanged);
+    unsigned char* sc = found + FG_BLOCK_OFF(scChanged);
     // OptiScaler clears both every dispatch, so they are bools and usually 0.
     if (!Readable(fg, 2) || *fg > 1 || *sc > 1) return false;
     if (!Writable(fg, 2)) return false;
     out->fgChanged = fg;
     out->scChanged = sc;
-    LogLine("CapturedHudlesses at +%lu of State; FGchanged at +%lu, SCchanged at +%lu",
+    LogLine("capturedHudlesses at +%lu of State; fgChanged at +%lu, scChanged at +%lu",
             (unsigned long) (found - state->base), (unsigned long) (fg - state->base),
             (unsigned long) (sc - state->base));
     return true;
@@ -941,7 +1005,7 @@ static bool FindFrameTimes(const BackendMap* map, FrameTimes* out) {
 static Config* g_config = NULL;
 static StateLoc g_state = { NULL, 0 };
 static BackendMap g_backends = { NULL, NULL };
-static msvc_string* g_newBackend = NULL;
+static uint32_t* g_newBackend = NULL;
 static uint64_t* g_frameCount = NULL;
 static FgFlags g_fgFlags = { NULL, NULL };
 static FrameTimes g_frameTimes = { NULL, NULL };
@@ -1067,6 +1131,12 @@ static const FieldDesc* FindField(const char* name) {
     return NULL;
 }
 
+/** The three Config members that hold an Upscaler enum. */
+static bool IsUpscalerField(const char* name) {
+    return _stricmp(name, "Dx11Upscaler") == 0 || _stricmp(name, "Dx12Upscaler") == 0 ||
+           _stricmp(name, "VulkanUpscaler") == 0;
+}
+
 /** Write one Config option, matching CustomOptional::operator=. */
 static bool SetField(const char* name, const char* type, const char* value) {
     const FieldDesc* f = FindField(name);
@@ -1081,9 +1151,16 @@ static bool SetField(const char* name, const char* type, const char* value) {
         else ((CustomOptional<uint32_t>*) at)->assign((uint32_t) strtoul(value, NULL, 10));
     } else if (strcmp(type, "f32") == 0 && f->kind == OPTI_FLOAT) {
         ((CustomOptional<float>*) at)->assign((float) atof(value));
+    } else if (strcmp(type, "str") == 0 && f->kind == OPTI_I32 && IsUpscalerField(name)) {
+        // Since 0.9.4 the upscaler ids are the Upscaler enum, not strings; the
+        // host still names them the way the INI does.
+        int32_t id = BackendId(value);
+        if (id < 0) {
+            snprintf(g_error, sizeof(g_error), "%s: unknown backend id \"%s\"", name, value);
+            return false;
+        }
+        ((CustomOptional<int32_t>*) at)->assign(id);
     } else if (strcmp(type, "str") == 0 && f->kind == OPTI_STR) {
-        // v0.9.4 keeps the upscaler ids as strings rather than enums, so this
-        // is the path the upscaler settings take.
         CustomOptional<msvc_string>* opt = (CustomOptional<msvc_string>*) at;
         size_t len = strlen(value);
         if (!Readable(&opt->base.value, sizeof(msvc_string))) return false;
@@ -1143,7 +1220,8 @@ static int MarkBackendsChanged() {
  * it survives to the next launch.
  */
 static bool SwitchBackend(const char* code) {
-    if (!IsBackendCode(code)) {
+    int32_t id = BackendId(code);
+    if (id < 0) {
         snprintf(g_error, sizeof(g_error), "unknown backend id \"%s\"", code);
         return false;
     }
@@ -1151,16 +1229,13 @@ static bool SwitchBackend(const char* code) {
         snprintf(g_error, sizeof(g_error), "newBackend not located; cannot switch upscaler");
         return false;
     }
-    if (!Writable(g_newBackend, sizeof(msvc_string))) {
+    if (!Writable(g_newBackend, sizeof(uint32_t))) {
         snprintf(g_error, sizeof(g_error), "newBackend is not writable");
         return false;
     }
-    if (!g_newBackend->assign_in_place(code, strlen(code))) {
-        snprintf(g_error, sizeof(g_error), "no room to write backend id \"%s\"", code);
-        return false;
-    }
+    *g_newBackend = (uint32_t) id;
     int marked = MarkBackendsChanged();
-    LogLine("newBackend = %s (%d backend(s) marked)", code, marked);
+    LogLine("newBackend = %s (%d) (%d backend(s) marked)", code, (int) id, marked);
     if (marked == 0) {
         snprintf(g_error, sizeof(g_error),
                  "backend id set but no upscaler is live yet; it applies when one starts");
@@ -1208,9 +1283,13 @@ static bool SetFfxFgIndex(int index) {
         snprintf(g_error, sizeof(g_error), "could not write FfxFGIndex");
         return false;
     }
+    // The overlay's own button raises fgChanged alone since 10.x. scChanged is
+    // what destroys the context so the new version is read at all, and
+    // FSRFG_Dx12::EvaluateState now honours it even when FG is not active, so
+    // both are raised, index first.
     *g_fgFlags.fgChanged = 1;
     *g_fgFlags.scChanged = 1;
-    LogLine("FfxFGIndex = %d, FGchanged and SCchanged raised", index);
+    LogLine("FfxFGIndex = %d, fgChanged and scChanged raised", index);
     return true;
 }
 
@@ -1348,8 +1427,8 @@ static void SampleFps() {
 // presented one whichever slot it came out of -- so all this has to find is the
 // pair.
 
-#define FT_SCAN_FIRST 280   // past the last offset the version lists validate
-#define FT_SCAN_LAST 704    // comfortably past where the pair is declared
+#define FT_SCAN_FIRST 520   // past the last offset the version lists validate
+#define FT_SCAN_LAST 720    // comfortably past where the pair is declared
 #define FT_MAX_SLOTS ((FT_SCAN_LAST - FT_SCAN_FIRST) / 8)
 #define FT_MAX_ROUNDS 12
 
@@ -1491,16 +1570,15 @@ static int ReadBoolField(const char* name) {
     return opt->value_or_default() ? 1 : 0;
 }
 
-/** Read one string option back out of Config, for reporting. */
-static void ReadStringField(const char* name, char* out, size_t outLen) {
+/** Read one of the Upscaler-enum options back out of Config, as its id string. */
+static void ReadUpscalerField(const char* name, char* out, size_t outLen) {
     out[0] = 0;
     const FieldDesc* f = FindField(name);
-    if (!f || !g_config || f->kind != OPTI_STR) return;
-    const CustomOptional<msvc_string>* opt =
-        (const CustomOptional<msvc_string>*) ((unsigned char*) g_config + f->offset);
+    if (!f || !g_config || f->kind != OPTI_I32) return;
+    const CustomOptional<int32_t>* opt =
+        (const CustomOptional<int32_t>*) ((unsigned char*) g_config + f->offset);
     if (!Readable(opt, sizeof(*opt))) return;
-    const msvc_string* value = opt->base.engaged ? &opt->base.value : &opt->defaultValue;
-    ReadStdString(value, out, outLen);
+    snprintf(out, outLen, "%s", BackendName(opt->value_or_default()));
 }
 
 /** Read one integer option back out of Config, for reporting. */
@@ -1530,11 +1608,13 @@ static void WriteStatus(const char* status) {
     SampleFrameTimes();
 
     char dx12[32] = "", dx11[32] = "", vk[32] = "", live[32] = "";
-    ReadStringField("Dx12Upscaler", dx12, sizeof(dx12));
-    ReadStringField("Dx11Upscaler", dx11, sizeof(dx11));
-    ReadStringField("VulkanUpscaler", vk, sizeof(vk));
-    if (g_newBackend && Readable(g_newBackend, sizeof(msvc_string)))
-        ReadStdString(g_newBackend, live, sizeof(live));
+    ReadUpscalerField("Dx12Upscaler", dx12, sizeof(dx12));
+    ReadUpscalerField("Dx11Upscaler", dx11, sizeof(dx11));
+    ReadUpscalerField("VulkanUpscaler", vk, sizeof(vk));
+    if (g_newBackend && Readable(g_newBackend, sizeof(uint32_t))) {
+        // Reset, the resting value, reads as "nothing pending" -- empty.
+        snprintf(live, sizeof(live), "%s", BackendName((int32_t) *g_newBackend));
+    }
 
     // Where the plugin decided its control files live. The host knows where it
     // *expects* them, so disagreement is the first thing worth seeing.
@@ -1683,8 +1763,8 @@ static void DiscoverStateExtras() {
                          offsetof(state_tail, ffxFGVersionIds), "FG",
                          g_ffxFgNames, &g_ffxFgCount);
     if (g_ffxUpscalerCount == 0)
-        AdoptFfxVersions(offsetof(state_tail, ffxUpscalerVersionNames),
-                         offsetof(state_tail, ffxUpscalerVersionIds), "upscaler",
+        AdoptFfxVersions(offsetof(state_tail, ffxUpscalerVersionsDx12.names),
+                         offsetof(state_tail, ffxUpscalerVersionsDx12.ids), "upscaler",
                          g_ffxUpscalerNames, &g_ffxUpscalerCount);
 }
 

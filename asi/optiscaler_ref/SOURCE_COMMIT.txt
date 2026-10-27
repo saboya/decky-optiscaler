@@ -16,10 +16,34 @@ vendored; scripts/generate_asi_layout.py carries their underlying types.
 unordered_dense.h is unchanged: the external/unordered_dense submodule is still
 at 73f3cbb237e84d483afafc743f1f14ec53e12314 at this commit.
 
-STATUS OF THE STATE MIRRORS in asi/live.cpp (state_head, state_fg_block,
-state_tail and the changeBackend/newBackend search): they were written against
-the v0.9.4 State.h and have NOT been ported to this commit. State::newBackend is
-an Upscaler enum here rather than a std::string, FGchanged/SCchanged and the
-FFX version lists moved, and DeviceAdapterNames is gone. Everything that
-depends on them fails closed and reports itself unavailable. Config-based
-controls (frame generation toggle) use the regenerated Config mirror.
+STATE MIRRORS in asi/live.cpp (state_head, state_frame_head, state_fg_block,
+state_tail) are ported to this commit's State.h. What changed since v0.9.4:
+
+  * newBackend and the three *Upscaler Config members are the Upscaler enum, not
+    strings; live.cpp maps the host's id strings onto it (OptiTypes.h/.cpp).
+  * DeviceAdapterNames is gone, so capturedHudlesses is the first table after
+    the head of State and changeBackend the next one. newBackend is an enum and
+    cannot tell the two apart any more; order does.
+  * fgChanged/scChanged are 22/21 bytes before capturedHudlesses; frameCount is
+    16 bytes before changeBackend.
+  * The FFX upscaler versions are two FfxVersionList structs (DX12, Vulkan);
+    only the DX12 one is read.
+  * skipHeapCapture and creatingD3DDevice are thread_local statics and take no
+    room in the object.
+
+Two sizes cannot be read from the headers because they are MSVC standard
+library internals: std::mutex (80 bytes) and std::deque (40 bytes). They were
+chosen by testing candidate layouts against the shipped OptiScaler.dll:
+State::Instance() is the function at RVA 0x2c7e0, and the code that calls it and
+then touches [rax+offset] gives 187 distinct offsets to compare a layout with.
+The six mutex/deque combinations tried scored 36-40 of 45 sampled members; 80/40
+scored best (40) and is the only one under which both frame-interval slots
+(+0x878, +0x880) are touched by the code. Five members still show no access under
+it -- three of them (WAR_xefgRequestFGToggle, xefgDynamicCapFps, dlssgLastSetMode)
+sit *before* either mutex or deque, so they do not depend on those sizes, and
+the reason they are never seen was not established. That is weaker evidence than
+a debugger would give. A different OptiScaler build means doing this again.
+
+NOT VERIFIED AT RUN TIME: none of this has been executed inside a game. Every
+lookup fails closed -- a State that does not match leaves the feature reporting
+unavailable -- but a mirror that matches wrongly would write to the wrong byte.

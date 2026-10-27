@@ -36,8 +36,9 @@ LOG_FILE = "decky_optiscaler_live.log"
 STATUS_STALE_SECONDS = 20
 
 # The backend ids OptiScaler accepts, from the overlay's own upscaler combos
-# (OptiScaler/menu/menu_common.cpp). In 0.9.4 these are plain strings in both
-# Config and State - they only became an enum after this release.
+# (OptiScaler/menu/menu_common.cpp). They were plain strings in both Config and
+# State up to 0.9.4 and are the Upscaler enum since (OptiScaler/OptiTypes.h); the
+# ASI maps these names to the enum, so the host keeps speaking in INI terms.
 BACKEND_CODES = (
     "xess", "xess_12",
     "fsr21", "fsr21_12",

@@ -38,10 +38,19 @@ shows which model runs. Plain FSR3 means a fallback.
 
 ## Live control
 
-The in-game ASI was regenerated against the nightly's `Config` layout, so the
-frame generation toggle should work. The features that depend on OptiScaler's
-`State` object (upscaler switching, FFX version switching, both frame rates) are
-**not ported yet** and report themselves unavailable.
+The in-game ASI is rebuilt against the nightly's `Config` and `State` layouts,
+so frame generation, the upscaler switch, the FFX frame generator and FSR
+version switches and the two frame rates are all wired up again.
+
+**None of it has been run in a game yet.** The `State` offsets were derived from
+the headers and cross-checked against the memory accesses in the shipped
+`OptiScaler.dll` (see `asi/optiscaler_ref/SOURCE_COMMIT.txt`), and every lookup
+fails closed, so a layout that does not match leaves the feature reporting
+unavailable rather than writing anywhere. Two limits:
+
+- Only the DX12 FFX version list is read; Vulkan games report none.
+- `std::mutex` (80 bytes) and `std::deque` (40 bytes) are MSVC internals that the
+  headers do not give, so those sizes come from the binary.
 
 ## Switching back / removing
 

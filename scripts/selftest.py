@@ -603,7 +603,10 @@ def check_live_control():
     check("the dx11-on-12 id is a distinct backend",
           live.LIVE_FIELDS["Upscalers.Dx11Upscaler"].encode("fsr31_12") == "fsr31_12")
     check("an id OptiScaler does not know is refused",
-          not _accepts(live.LIVE_FIELDS["Upscalers.Dx12Upscaler"], "ffx"))
+          not _accepts(live.LIVE_FIELDS["Upscalers.Dx12Upscaler"], "not_a_backend"))
+    check("the FFX backend ids are known",
+          live.LIVE_FIELDS["Upscalers.Dx12Upscaler"].encode("ffx") == "ffx"
+          and live.LIVE_FIELDS["Upscalers.Dx11Upscaler"].encode("ffx_12") == "ffx_12")
 
     root = Path(tempfile.mkdtemp(prefix="optiscaler-live-"))
     try:
@@ -811,7 +814,7 @@ def check_live_diagnostics():
         check("the explicit switch sends just the backend command",
               sent["ok"] and body[1] == "backend fsr31", body)
         check("the explicit switch refuses an unknown id",
-              not live.switch_backend(str(target), "ffx")["ok"])
+              not live.switch_backend(str(target), "not_a_backend")["ok"])
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -1617,9 +1620,10 @@ def check_version_pin():
         check("every mirrored member still exists in the vendored header",
               not absent, absent[:5])
 
-    # 0.9.4-specific: the upscaler ids are strings, not the enum master uses.
-    check("the vendored build stores upscalers as strings",
-          "CustomOptional<std::string, SoftDefault> Dx12Upscaler" in config_h)
+    # Since 0.9.4 the upscaler ids are the Upscaler enum in both Config and State;
+    # live.cpp maps the host's id strings onto it.
+    check("the vendored build stores upscalers as the Upscaler enum",
+          "CustomOptional<Upscaler, SoftDefault> Dx12Upscaler" in config_h)
 
 
 def check_optipatcher():
@@ -1740,15 +1744,32 @@ def check_asi_backend_layout():
 
     state_h = (ref / "State.h").read_text(encoding="utf-8")
     # newBackend is located as "one table past changeBackend", and frameCount as
-    # the eight bytes in front of it. Both are declaration-order facts.
+    # the sixteen bytes in front of it. Both are declaration-order facts.
     order = re.search(
         r"UINT64 frameCount = 0;\s*"
+        r"bool vkAntiLagSupported = false;\s*"
+        r"(?://[^\n]*\n\s*)*"
+        r"bool amdFlipMeterCreated = false;\s*"
+        r"uint32_t amdFlipMeterMode = 0;\s*"
         r"(?://[^\n]*\n\s*)*"
         r"ankerl::unordered_dense::map<unsigned int, bool> changeBackend;\s*"
-        r"std::string newBackend",
+        r"Upscaler newBackend = Upscaler::Reset;",
         state_h)
     check("frameCount, changeBackend and newBackend are still declared together",
           order is not None)
+    opti_types = (ref / "OptiTypes.h").read_text(encoding="utf-8")
+    enum_body = re.search(r"enum class Upscaler\s*\{(.*?)\};", opti_types, re.S).group(1)
+    members = re.findall(r"^\s*(\w+),", re.sub(r"//[^\n]*", "", enum_body), re.M)
+    check("the Upscaler enum is the order live.cpp maps backend ids onto",
+          members == ["XeSS", "XeSS_on12", "FSR21", "FSR21_on12", "FSR22", "FSR22_on12",
+                      "FSR31", "FFX", "FFX_on12", "DLSS", "DLSS_on12", "DLSSD"]
+          and re.search(r"DLSSD,[^\n]*\n\s*Reset\s*\}", opti_types) is not None,
+          members)
+    codes = (ref / "OptiTypes.cpp").read_text(encoding="utf-8")
+    for code in ("xess", "xess_12", "fsr21", "fsr21_12", "fsr22", "fsr22_12", "fsr31",
+                 "ffx", "ffx_12", "dlss", "dlss_12", "dlssd"):
+        check(f"OptiScaler still has a backend id \u201c{code}\u201d",
+              f'"{code}"' in codes, code)
 
     # The mirror itself. These are compiled as static_asserts, so their presence
     # is what matters; the build fails if any of them stops holding.
@@ -1766,8 +1787,10 @@ def check_asi_backend_layout():
     # rather than something guessed at afterwards.
     check("the load factor is checked at its exact offset, not scanned for",
           "t->m_max_load_factor != kMaxLoadFactor" in source)
-    check("newBackend is what tells changeBackend from State's other maps",
-          "return LooksLikeNewBackend((const msvc_string*) (t + 1));" in source)
+    check("newBackend is still checked as part of recognising the map",
+          "return LooksLikeNewBackend((const uint32_t*) (t + 1));" in source)
+    check("changeBackend is only looked for after capturedHudlesses",
+          "unsigned char* p = (unsigned char*) (captured + 1);" in source)
     check("locating the map and the string is one indivisible step",
           "g_newBackend = found.newBackend;" in source)
 
@@ -1788,7 +1811,12 @@ def _state_members():
         if not raw.startswith("    ") or raw.startswith("     "):
             continue
         line = raw.strip()
-        if not line.endswith(";") or "(" in line:
+        if not line.endswith(";"):
+            continue
+        # A "(" before any initialiser is a function; one inside a brace
+        # initialiser -- `time_point startTime { now() };` -- is a member.
+        declarator = re.split(r"\s*=|\s*\{", line)[0]
+        if "(" in declarator:
             continue
         if line.startswith(("//", "static", "using", "typedef", "return", "friend")):
             continue
@@ -1810,17 +1838,26 @@ def check_asi_state_layout():
     """The ASI's model of State must match the vendored header, member for member.
 
     Two things are located by walking out from an object the scan can identify:
-    State::FGchanged and State::SCchanged, 21 and 20 bytes in front of
-    CapturedHudlesses, and State::ffxFGVersionNames, a computed distance past
-    changeBackend. Both distances come from the compiler, out of structs in
-    live.cpp that mirror the declaration runs -- so what has to be checked here
-    is that the header still declares those runs the way the mirrors say.
+    State::fgChanged and State::scChanged, 22 and 21 bytes in front of
+    capturedHudlesses, and the FFX version lists and frame intervals, a computed
+    distance past changeBackend. Every distance comes from the compiler, out of
+    structs in live.cpp that mirror the declaration runs -- so what has to be
+    checked here is that the header still declares those runs the way the
+    mirrors say.
 
-    This matters more than the offsets themselves: FGchanged is written to. A
+    This matters more than the offsets themselves: fgChanged is written to. A
     member inserted upstream would move it, every static_assert would still
     hold (they are about the mirror, not the header), and the plugin would set a
     byte in the middle of something else. The version pin makes that impossible
     in a shipped build; this makes it impossible to miss when the pin moves.
+
+    Two members are not in the mirror because they take no space in the object:
+    ``skipHeapCapture`` and ``creatingD3DDevice`` are ``inline static
+    thread_local``. And two types are not readable from the header at all --
+    std::mutex and std::deque are MSVC internals, 80 and 40 bytes here. Those
+    sizes were established from the build itself (every ``State`` member access
+    in OptiScaler.dll lands where the mirror says it should) and are pinned in
+    SOURCE_COMMIT.txt; a different OptiScaler build means measuring them again.
     """
     print("\nASI State layout")
     source = (ROOT / "asi" / "live.cpp").read_text(encoding="utf-8")
@@ -1828,41 +1865,49 @@ def check_asi_state_layout():
     check("State's members can be read out of the vendored header",
           len(declared) > 100, len(declared))
 
-    for struct in ("state_head", "state_fg_block", "state_tail"):
+    # thread_local statics take no room in the object, so they are not in the
+    # mirror; leave them out of the declared run the same way.
+    state_h = (ROOT / "asi" / "optiscaler_ref" / "State.h").read_text(encoding="utf-8")
+    static_members = set(re.findall(r"inline static thread_local \w+ (\w+)", state_h))
+    declared = [name for name in declared if name not in static_members]
+
+    for struct in ("state_head", "state_fg_block", "state_tail", "state_frame_head"):
         mirrored = _mirror_members(source, struct)
         check(f"live.cpp declares a {struct} mirror", bool(mirrored), mirrored)
         if not mirrored:
             continue
+        # Mutexes and deques are mirrored as raw bytes, under the member's name.
         if mirrored[0] not in declared:
             check(f"{struct} starts at a member State still has", False, mirrored[0])
             continue
         at = declared.index(mirrored[0])
-        # The run has to match exactly: a member inserted anywhere inside it
-        # shifts everything the mirror computes an offset for.
+        window = declared[at:at + len(mirrored)]
         check(f"{struct} mirrors State's declaration run exactly",
-              declared[at:at + len(mirrored)] == mirrored,
-              declared[at:at + len(mirrored)])
+              window == mirrored, (window, mirrored))
 
     # The mirrors reproduce sizes as well as order, so the few declarations
     # whose *type* the offsets depend on are pinned here too.
-    state_h = (ROOT / "asi" / "optiscaler_ref" / "State.h").read_text(encoding="utf-8")
     for text, why in (
-        ("bool FGchanged = false;", "the flag the FFX FG switch raises"),
-        ("bool SCchanged = false;", "the flag that makes the context rebuild"),
-        ("size_t FGcapturedResourceCount = false;", "the one non-bool in that run"),
-        ("ankerl::unordered_dense::map<void*, CapturedHudlessInfo> CapturedHudlesses;",
+        ("bool fgChanged = false;", "the flag the FFX FG switch raises"),
+        ("bool scChanged = false;", "the flag that makes the context rebuild"),
+        ("size_t fgCapturedResourceCount = 0;", "the one non-bool in that run"),
+        ("ankerl::unordered_dense::map<void*, CapturedHudlessInfo> capturedHudlesses;",
          "the table the flags are found relative to"),
         ("uint64_t NVNGX_ApplicationId = 1337;", "the value that confirms that table"),
         ("std::vector<const char*> ffxFGVersionNames {};", "the FFX FG version names"),
         ("std::vector<uint64_t> ffxFGVersionIds {};", "the ids declared beside them"),
-        ("std::vector<const char*> ffxUpscalerVersionNames {};",
+        ("FfxVersionList ffxUpscalerVersionsDx12 {};",
          "the FSR versions, the only place the exact one is written down"),
-        ("std::vector<uint64_t> ffxUpscalerVersionIds {};",
-         "the ids declared beside those"),
+        ("std::vector<const char*> names {};", "the names inside each version list"),
+        ("std::vector<uint64_t> ids {};", "the ids declared beside those"),
         ("std::deque<double> upscaleTimes;", "the first deque the tail steps over"),
         ("std::deque<double> frameTimes;", "the second"),
+        ("std::mutex loadedAsiPluginsMutex;", "the first mutex the tail steps over"),
+        ("std::mutex frameTimeMutex;", "the second"),
         ("double lastFGFrameTime = 0.0;", "the frame-generation hook's interval"),
         ("double presentFrameTime = 0.0;", "the wrapped swapchain's interval"),
+        ("inline static thread_local bool skipHeapCapture = false;",
+         "the member that takes no space in the object"),
     ):
         check(f"State still declares {why}", text in state_h, text)
 
@@ -1872,55 +1917,49 @@ def check_asi_state_layout():
 
     # Compiled assertions; their presence is what matters, the build enforces them.
     for text, why in (
-        ("offsetof(state_head, DeviceAdapterNames) == 104", "where the search for the table starts"),
-        ("FG_BLOCK_OFF(FGchanged) == -21", "how far in front of the table the flag sits"),
-        ("FG_BLOCK_OFF(SCchanged) == -20", "the flag beside it"),
+        ("offsetof(state_head, gameName) == 32", "where gameName sits"),
+        ("offsetof(state_head, gameVersion) == 72", "where gameVersion sits"),
+        ("sizeof(state_frame_head) == 16", "how far in front of the map frameCount sits"),
+        ("FG_BLOCK_OFF(fgChanged) == -22", "how far in front of the table the flag sits"),
+        ("FG_BLOCK_OFF(scChanged) == -21", "the flag beside it"),
         ("FG_BLOCK_OFF(NVNGX_ApplicationId) == 72", "the value that confirms the table"),
-        ("offsetof(state_tail, ffxFGVersionNames) == 256", "where the version list sits"),
-        ("offsetof(state_tail, ffxUpscalerVersionNames) == 208",
-         "where the FSR version list sits"),
-        ("offsetof(state_tail, lastFGFrameTime) == 400", "where the frame intervals sit"),
-        ("sizeof(msvc_deque_raw) == 32", "the width of the deques the tail steps over"),
+        ("offsetof(state_tail, ffxUpscalerVersionsDx12) == 312", "where the FSR version lists sit"),
+        ("offsetof(state_tail, ffxFGVersionNames) == 408", "where the FG version list sits"),
+        ("offsetof(state_tail, lastFGFrameTime) == 592", "where the frame intervals sit"),
         ("sizeof(hudless_entry) == 24", "the stride the table's elements are checked at"),
-    ) :
+    ):
         check(f"live.cpp pins {why}", f"static_assert({text}," in source, text)
 
     # The flags are written, so identification has to be unambiguous or refused.
     check("an ambiguous table means the flags stay unlocated",
-          "if (matches != 1) {" in source, "FindFgFlags")
-    check("the search is bounded by two objects already identified",
-          "offsetof(state_head, DeviceAdapterNames) + sizeof(ud_table)" in source
-          and "unsigned char* last = (unsigned char*) map->table;" in source)
+          "if (matches != 1) {" in source, "FindCapturedHudlesses")
+    check("the search starts past the identified head of State",
+          "unsigned char* first = state->base + sizeof(state_head);" in source)
     check("nothing is written when the flags were not found",
           'snprintf(g_error, sizeof(g_error),\n                 "FGchanged/SCchanged not located' in source)
 
-    # The overlay's own "Change FG" button is what this copies; if OptiScaler
-    # ever stops doing all three writes, so should we.
+    # 10.x's overlay raises fgChanged alone for "Change FG", where 0.9.4 raised
+    # both. FSRFG consumes scChanged by destroying the context -- and, since
+    # 8feb5d0c, does so even when frame generation is off -- which is the part a
+    # version change needs. This plugin raises both, so what is checked is that
+    # the consumer still behaves that way.
     menu = (ROOT / "asi" / "optiscaler_ref" / "menu_common.cpp").read_text(encoding="utf-8")
-    check("the overlay's Change FG button is still config, then both flags",
+    check("the overlay's Change FG button still writes the index and raises fgChanged",
           re.search(r'ImGui::Button\("Change FG"\).*?config->FfxFGIndex = _ffxFGIndex;\s*'
-                    r'state\.FGchanged = true;\s*state\.SCchanged = true;', menu, re.S) is not None)
-    # And the same for the FFX upscaler, whose button is the ordinary upscaler
-    # switch pointed at the backend that is already running: the index into
-    # Config, then a rebuild. This plugin leaves newBackend empty instead of
-    # naming the current backend, because ChangeFeature reads that as "use
-    # whatever Config holds for this API" -- which is the same rebuild by a
-    # route that cannot pick the wrong graphics API.
-    check("the overlay's FFX Change Upscaler is still config, then a rebuild",
-          re.search(r'ImGui::Button\("Change Upscaler"\).*?'
-                    r'config->FfxUpscalerIndex = _ffxUpscalerIndex;\s*'
-                    r'state\.newBackend = currentBackend;\s*'
+                    r'state\.fgChanged = true;', menu, re.S) is not None)
+    check("the FFX upscaler version change is still config, then a rebuild",
+          re.search(r'config->FfxUpscalerIndex = n;\s*state\.newBackend = currentBackend;\s*'
                     r'MARK_ALL_BACKENDS_CHANGED\(\);', menu, re.S) is not None)
-    # What lets this plugin leave newBackend alone: every provider reads an
-    # empty one as "use Config", and clears it again after a rebuild, so an
-    # empty one is also the normal resting state.
+    # What lets this plugin leave newBackend alone for a version change: every
+    # provider reads Reset as "use Config", and puts Reset back after a rebuild.
     for provider in ("Dx12", "Dx11", "Vk"):
         text = (ROOT / "asi" / "optiscaler_ref" / f"FeatureProvider_{provider}.cpp") \
             .read_text(encoding="utf-8")
-        check(f"an empty newBackend still means \u201cuse Config\u201d on {provider}",
-              'State::Instance().newBackend == ""' in text)
-        check(f"and {provider} still clears it once the rebuild succeeded",
-              'State::Instance().newBackend = "";' in text)
+        check(f"Reset still means \u201cuse Config\u201d on {provider}",
+              "state.newBackend == Upscaler::Reset" in text
+              or "State::Instance().newBackend == Upscaler::Reset" in text)
+        check(f"and {provider} still puts Reset back once the rebuild succeeded",
+              "newBackend = Upscaler::Reset;" in text)
 
     config_cpp = (ROOT / "asi" / "optiscaler_ref" / "Config.cpp").read_text(encoding="utf-8")
     check("FfxFGIndex is still the ini's [FSR] FGIndex",
@@ -1929,11 +1968,9 @@ def check_asi_state_layout():
           'FfxUpscalerIndex.set_from_config(readInt("FSR", "UpscalerIndex"))' in config_cpp)
 
     # There are two intervals and one counter, and which hook writes which is
-    # deliberately *not* relied on: reading these two files says presentFrameTime
-    # is the presented side, and on a real Deck running FSR-FG the numbers said
-    # the opposite. What is checked here is only that both writers still exist
-    # and that the counter still moves with one of them -- `live._frame_rates`
-    # works out which from the values themselves.
+    # deliberately *not* relied on: `live._frame_rates` works out which from the
+    # values themselves. What is checked here is only that both writers still
+    # exist and that the counter still moves with one of them.
     swapchain = (ROOT / "asi" / "optiscaler_ref" / "wrapped_swapchain.cpp") \
         .read_text(encoding="utf-8")
     check("presentFrameTime is still timed in the wrapped swapchain",
@@ -1942,13 +1979,9 @@ def check_asi_state_layout():
           "State::Instance().frameCount = _frameCounter;" in swapchain)
     fg_hooks = (ROOT / "asi" / "optiscaler_ref" / "FG_Hooks.cpp").read_text(encoding="utf-8")
     check("lastFGFrameTime is still timed in the frame-generation hook",
-          "State::Instance().lastFGFrameTime = ftDelta;" in fg_hooks
-          and "State::Instance().FGPresentIsCalled = true;" in fg_hooks)
-    # OptiScaler's own overlay derives the pair the same way round this now
-    # does: one measured rate, and the other from a ratio.
-    menu = (ROOT / "asi" / "optiscaler_ref" / "menu_common.cpp").read_text(encoding="utf-8")
-    check("the overlay still shows one rate divided into two",
-          "frameRate / (float) (fg->GetInterpolatedFrameCount() + 1)" in menu)
+          "state.lastFGFrameTime = ftDelta;" in fg_hooks)
+    check("the overlay still derives the base rate from the interpolated count",
+          "(double) (interpolatedFrameCount + 1)" in menu)
 
 
 def check_auto_plan():
