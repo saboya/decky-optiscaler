@@ -454,6 +454,18 @@ def _read_measurements(report, raw):
     report["api"] = {1: "dx11", 2: "dx12", 3: "vulkan"}.get(_number(raw.get("api"), int))
     report["ffx_upscaler_api"] = {2: "dx12", 3: "vulkan"}.get(
         _number(raw.get("ffx_upscaler_api"), int))
+    # FSR 4.1.2 Lite wants an entry of the game's own FFX list -- the AMD driver
+    # library's -- whose position depends on the API and the game, so the in-game
+    # plugin chooses it when the list arrives. These say how that went.
+    # An older in-game plugin has no such line, and that is not "still waiting".
+    report["lite"] = None if "lite_state" not in raw else {
+        1: "not_requested",   # Fsr4Model is not INT8 Lite
+        2: "already",         # the index in use already qualified
+        3: "selected",        # the plugin switched to the qualifying entry
+        4: "no_entry",        # the list has nothing at 4.1.2 or newer
+    }.get(_number(raw.get("lite_state"), int), "waiting")
+    lite_index = _number(raw.get("lite_index"), int, unknown=-1)
+    report["lite_index"] = lite_index if lite_index is not None and lite_index >= 0 else None
     report["rendered_ms"] = _number(raw.get("rendered_ms"), float, unknown=0.0)
     report["presented_ms"] = _number(raw.get("presented_ms"), float, unknown=0.0)
     report["base_fps"], report["total_fps"] = _frame_rates(
@@ -487,6 +499,8 @@ def status(target_dir, source=None):
         "ffx_upscaler_versions": [],
         "api": None,
         "ffx_upscaler_api": None,
+        "lite": None,
+        "lite_index": None,
         # Which status-file format the in-game plugin speaks. An install that
         # predates a feature reports an older number rather than nothing at all.
         "schema": None,

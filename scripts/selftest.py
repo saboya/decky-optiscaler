@@ -2011,6 +2011,90 @@ def check_asi_state_layout():
           "(double) (interpolatedFrameCount + 1)" in menu)
 
 
+def check_lite_selection():
+    """Picking the FFX list entry that carries the INT8 Lite model.
+
+    The Lite model lives only in AMD's driver library, and where that sits in a
+    game's FFX version list depends on the API and the game -- appended last on
+    Vulkan, inserted by version on DX12 -- so the index cannot be written ahead of
+    time. The rule is in asi/lite_select.h as plain C++, which is compiled and run
+    here natively: the ASI itself only builds for Windows, so this is the one
+    piece of the selection that can be executed on a dev machine.
+    """
+    import subprocess
+
+    print("\nFSR 4.1.2 Lite index selection")
+    header = (ROOT / "asi" / "lite_select.h").read_text(encoding="utf-8")
+    test = ROOT / "asi" / "test_lite_select.cpp"
+    check("the selection rule has a test", test.is_file())
+
+    compiler = None
+    for candidate in (["zig", "c++"], ["c++"], ["g++"], ["clang++"]):
+        if shutil.which(candidate[0]):
+            compiler = candidate
+            break
+    if compiler is None:
+        print("  [skip] no C++ compiler found; lite_select.h not run")
+    else:
+        out = Path(tempfile.mkdtemp(prefix="lite-select-"))
+        try:
+            exe = out / "test_lite"
+            built = subprocess.run(
+                compiler + ["-std=c++17", "-Wall", "-Wextra", "-o", str(exe), str(test)],
+                capture_output=True, text=True)
+            check("the selection rule compiles natively", built.returncode == 0,
+                  built.stderr[-300:])
+            if built.returncode == 0:
+                ran = subprocess.run([str(exe)], capture_output=True, text=True)
+                failures = [line for line in ran.stdout.splitlines() if line.startswith("FAIL")]
+                check("every selection case passes", ran.returncode == 0 and not failures,
+                      failures or ran.stdout[-200:])
+                passed = sum(1 for line in ran.stdout.splitlines() if line.startswith("ok "))
+                check("and there are cases to pass", passed >= 15, passed)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    # It is the version that decides, not the position: both lists the game can
+    # report are covered by name in the test.
+    check("the minimum is 4.1.2, the first library with INT8 Lite",
+          "kMinLite = { 4, 1, 2, true }" in header)
+
+    source = (ROOT / "asi" / "live.cpp").read_text(encoding="utf-8")
+    check("live.cpp uses the shared rule", '#include "lite_select.h"' in source
+          and "litesel::PickLiteIndex(g_ffxUpscalerNames, g_ffxUpscalerCount)" in source)
+    check("it only acts when the plugin asked for INT8 Lite (Fsr4Model 3)",
+          'if (ReadU8Field("Fsr4Model") != 3)' in source)
+    check("it writes through the same checked path as the FSR version picker",
+          "if (!SetFfxUpscalerIndex(wanted)) return;" in source
+          and "MarkBackendsChanged();\n    g_liteState = LITE_SELECTED;" in source)
+    check("a user's own qualifying choice is left alone",
+          "g_liteState = LITE_ALREADY;" in source)
+    check("a list with nothing new enough is reported, not papered over",
+          "g_liteState = LITE_NO_ENTRY;" in source)
+    check("the build script keeps the header on the include path",
+          "-I\"$here\"" in (ROOT / "asi" / "build.sh").read_text(encoding="utf-8"))
+
+    # The Vulkan list gains the driver's entry in a second step, and a list read
+    # before that has none, which is not a final answer.
+    check("a list that grows after being read is read again",
+          "the FFX upscaler list changed" in source)
+
+    from optiscaler import live
+    status = {}
+    live._read_measurements(status, {"lite_state": "3", "lite_index": "2"})
+    check("a selection is carried through to the panel",
+          status["lite"] == "selected" and status["lite_index"] == 2, status)
+    status = {}
+    live._read_measurements(status, {"lite_state": "4", "lite_index": "-1"})
+    check("a list with no qualifying entry is carried through",
+          status["lite"] == "no_entry" and status["lite_index"] is None, status)
+    status = {}
+    live._read_measurements(status, {})
+    check("an older in-game plugin is not reported as still waiting",
+          status["lite"] is None, status)
+    check("the status schema was bumped for the new fields", '"schema 7\\n"' in source)
+
+
 def check_auto_plan():
     """Reading a wiki entry back out as instructions.
 
@@ -2752,6 +2836,7 @@ def main():
     check_asi_wide_formats()
     check_asi_backend_layout()
     check_asi_state_layout()
+    check_lite_selection()
     check_auto_plan()
     check_reframework()
     check_prose_is_not_a_specification()

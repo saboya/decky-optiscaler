@@ -759,11 +759,23 @@ export function BasicPanel({
             </Notice>
           </PanelSectionRow>
         ) : null}
-        {int8Selected ? (
+        {int8Selected && fsr4Build === "lite" && live?.attached && live.lite === "no_entry" ? (
           <PanelSectionRow>
-            <Notice tone="info" title={fsr4Build === "lite" ? "FSR 4.1.2 Lite ready for the next launch" : "FSR 4 Lite settings without AMD's library"}>
+            <Notice tone="warn" title="This game's FSR list has no FSR 4.1.2">
+              AMD's library is installed, but the game's FidelityFX runtime did not list
+              it, so the Lite model has nothing to run on and the game will use FSR 3.
+              Check OptiScaler.log for why the driver library was not loaded.
+            </Notice>
+          </PanelSectionRow>
+        ) : int8Selected ? (
+          <PanelSectionRow>
+            <Notice tone="info" title={fsr4Build === "lite" ? (live?.attached && (live.lite === "selected" || live.lite === "already") ? "FSR 4.1.2 Lite selected" : "FSR 4.1.2 Lite ready for the next launch") : "FSR 4 Lite settings without AMD's library"}>
               {fsr4Build === "lite"
-                ? "Experimental on the Steam Deck. Check the game's watermark for FSR4 and the INT8 Lite model. Frame generation is configured separately."
+                ? live?.attached && live.lite === "selected"
+                  ? `Switched this game to FSR ${live.ffx_upscaler_versions?.[live.lite_index ?? -1] ?? "4.1.2"}, the entry in its list that carries the Lite model. Check the watermark for FSR4 and INT8 Lite.`
+                  : live?.attached && live.lite === "already"
+                    ? "This game was already on an FSR version that carries the Lite model. Check the watermark for FSR4 and INT8 Lite."
+                    : "Experimental on the Steam Deck. The right FSR version is chosen from the game's own list once it has started. Check the game's watermark for FSR4 and the INT8 Lite model. Frame generation is configured separately."
                 : "Select FSR 4.1.2 Lite — Steam Deck again to fetch AMD's library."}
             </Notice>
           </PanelSectionRow>

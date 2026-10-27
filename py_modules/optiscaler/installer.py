@@ -418,9 +418,15 @@ LITE_SETTINGS = {
 }
 #: With the Vulkan library too, native Vulkan games use the FFX backend directly
 #: (it is the one that loads amdvkffx64); ffx_12 would run them through DX12,
-#: where amdxcffx64 is used instead. UpscalerIndex is left to the game's own
-#: list: the Vulkan list appends the driver's FSR 4 after the SDK's versions, so
-#: index 0 is not it, and the right index is only known once the game has asked.
+#: where amdxcffx64 is used instead.
+#:
+#: UpscalerIndex stays 0 in the INI on purpose. Where the driver's FSR 4 sits in a
+#: game's FFX version list depends on the API and the game -- first on DX12, last
+#: on Vulkan, after the SDK's FSR 3 entries -- so no value written here is right
+#: for both, and a value picked for one game would be wrong the next time it runs
+#: on the other API. The in-game plugin reads the list the game reports and picks
+#: the entry that carries the Lite model itself, every launch (asi/lite_select.h);
+#: it only does so while Fsr4Model is INT8 Lite, which is what this preset writes.
 LITE_SETTINGS_VULKAN = {
     "Upscalers": {"VulkanUpscaler": "ffx"},
 }

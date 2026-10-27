@@ -6,6 +6,22 @@ later bundle a **10.x nightly**, named in each entry.
 
 ## [Unreleased]
 
+### Changed
+
+- **FSR 4.1.2 Lite picks its own FSR version in the game.** The preset used to
+  leave `UpscalerIndex=0` and rely on it being the right entry, which it is not on
+  Vulkan: that list has the SDK's FSR 3 versions first and AMD's driver library,
+  the only one with the Lite model, appended last. The in-game plugin now reads
+  the list the game reports, takes the highest entry that is 4.1.2 or newer (the
+  SDK's own FSR 4 is 4.1.1 and has no Lite model), and switches to it with the
+  same rebuild the FSR version picker uses. It does so only while the Lite model
+  is what is configured, leaves a game that already qualifies alone, and when the
+  list has nothing new enough it says so in the panel and changes nothing. The
+  choice is made again each launch, since it is only right for that game on that
+  API. The rule is plain C++ (`asi/lite_select.h`) with a native test that the
+  self-test compiles and runs; it has not been run inside a game.
+- The live status file is schema 7: it adds `lite_state` and `lite_index`.
+
 ## [0.1.0-lite.1] - 2026-10-27
 
 **Prerelease, and not yet run in a game.** FSR 4.1.2 Lite on the Steam Deck, on
@@ -73,8 +89,7 @@ This is a fork of [danielcamilo1/decky-optiscaler](https://github.com/danielcami
   to suspect.
 - Native Vulkan games have no frame rate: OptiScaler only counts frames in its
   DXGI swapchain wrapper.
-- `Fsr4Preset` and the Vulkan FSR 4 version index are left to the game's own
-  list; the preset does not pick the driver's FSR 4 entry for you.
+- `Fsr4Preset` is left to the game's own default.
 - OptiPatcher and the compatibility-list seed were not re-checked against the
   nightly.
 

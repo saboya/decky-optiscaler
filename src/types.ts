@@ -498,6 +498,17 @@ export interface LiveStatus {
   api?: "dx11" | "dx12" | "vulkan" | null;
   ffx_upscaler_api?: "dx12" | "vulkan" | null;
   /**
+   * How picking the FSR 4.1.2 Lite entry of the game's FFX list went. That entry
+   * is AMD's driver library, whose place in the list depends on the API and the
+   * game, so the in-game plugin chooses it once the list arrives:
+   * `selected` (it switched), `already` (the index in use qualified),
+   * `no_entry` (nothing at 4.1.2 or newer: the driver library is not loaded),
+   * `not_requested` (the Lite model is not what is configured), `waiting`.
+   * Null when the in-game plugin predates the feature.
+   */
+  lite?: "waiting" | "not_requested" | "already" | "selected" | "no_entry" | null;
+  lite_index?: number | null;
+  /**
    * Whether the FSR version can be changed without a restart. It needs no flags
    * of its own — the same rebuild that switches upscaler re-reads it — so this
    * is really "there is a list to pick from and an upscaler to rebuild".

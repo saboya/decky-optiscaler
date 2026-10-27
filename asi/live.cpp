@@ -37,6 +37,7 @@
 
 #include "msvc_abi.h"
 #include "generated/config_mirror.h"
+#include "lite_select.h"
 
 using namespace optimirror;
 
@@ -1043,6 +1044,21 @@ static int g_ffxUpscalerCount = 0;
 // Which graphics API's list those names came from (API_DX12 / API_VULKAN), so a
 // game whose API is only known later does not keep the other API's versions.
 static int g_ffxUpscalerApi = 0;
+
+// FSR 4.1.2 Lite selection. The INT8 Lite model exists only in AMD's driver
+// library, and where that library sits in the FFX version list depends on the
+// API and on the game (see lite_select.h), so the right FfxUpscalerIndex cannot
+// be written to the INI ahead of time. It is chosen here, once, when the game's
+// list first arrives.
+enum LiteState {
+    LITE_WAITING = 0,      // no list yet
+    LITE_NOT_REQUESTED,    // Fsr4Model is not INT8 Lite, so this stays out of it
+    LITE_ALREADY,          // the index in use already names a Lite-capable entry
+    LITE_SELECTED,         // switched to one
+    LITE_NO_ENTRY          // the list has nothing new enough: no driver library loaded
+};
+static int g_liteState = LITE_WAITING;
+static int g_liteIndex = -1;
 // Exponentially smoothed copies of the two intervals above, in milliseconds.
 // Each is the last frame's delta rather than an average, so a single reading is
 // as noisy as one frame; the panel wants a number that holds still.
@@ -1608,6 +1624,16 @@ static void ReadUpscalerField(const char* name, char* out, size_t outLen) {
     snprintf(out, outLen, "%s", BackendName(opt->value_or_default()));
 }
 
+/** Read one byte-sized option out of Config; -1 when it is unset or cannot be read. */
+static int ReadU8Field(const char* name) {
+    const FieldDesc* f = FindField(name);
+    if (!f || !g_config || f->kind != OPTI_U8) return -1;
+    const CustomOptional<uint8_t>* opt =
+        (const CustomOptional<uint8_t>*) ((unsigned char*) g_config + f->offset);
+    if (!Readable(opt, sizeof(*opt))) return -1;
+    return opt->has_value() ? (int) opt->value_or_default() : -1;
+}
+
 /** Read one integer option back out of Config, for reporting. */
 static int ReadIntField(const char* name) {
     const FieldDesc* f = FindField(name);
@@ -1665,7 +1691,7 @@ static void WriteStatus(const char* status) {
 
     char body[4096];
     int n = snprintf(body, sizeof(body),
-                     "schema 6\n"
+                     "schema 7\n"
                      "status %s\n"
                      "seq %ld\n"
                      "applied %d\n"
@@ -1690,6 +1716,8 @@ static void WriteStatus(const char* status) {
                      "ffx_upscaler_versions %s\n"
                      "api %d\n"
                      "ffx_upscaler_api %d\n"
+                     "lite_state %d\n"
+                     "lite_index %d\n"
                      "rendered_ms %.3f\n"
                      "presented_ms %.3f\n"
                      "error %s\n",
@@ -1699,7 +1727,7 @@ static void WriteStatus(const char* status) {
                      dir, g_fps, ReadBoolField("FGEnabled"), dx12, dx11, vk, live,
                      (void*) g_fgFlags.fgChanged, ReadIntField("FfxFGIndex"), ffxFg,
                      ReadIntField("FfxUpscalerIndex"), ffxUpscaler, ReadApi(),
-                     g_ffxUpscalerApi,
+                     g_ffxUpscalerApi, g_liteState, g_liteIndex,
                      g_renderedMs, g_presentedMs, g_error);
     if (n < 0) return;
     HANDLE h = CreateFileW(g_statusPath, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
@@ -1806,6 +1834,64 @@ static size_t FfxListOffsetForApi(int api) {
 }
 
 /**
+ * Pick the FFX upscaler version that can run INT8 Lite, once, when the game's
+ * list first arrives.
+ *
+ * Only when the plugin asked for it: Config::Fsr4Model is INT8 Lite (3), which
+ * the Lite preset writes and nothing else does. A user who chose a different
+ * model, or none, is not touched. It also leaves alone a game whose index
+ * already names a qualifying entry -- that is the user's own choice, or this
+ * function's from an earlier pass.
+ *
+ * It writes the same two things the overlay's "FFX Upscaler" combo does (the
+ * index, then a rebuild) through SetFfxUpscalerIndex and MarkBackendsChanged,
+ * so it inherits their checks: an index the list does not have is refused, and
+ * nothing is written unless the backend map was located.
+ *
+ * The list the game reports is the authority. If it has no entry new enough --
+ * the driver library was not found or not loaded -- the state says so and the
+ * index is left alone, rather than falling back to an FSR 4 that has no Lite
+ * model and reporting success.
+ */
+static void SelectLiteIndex() {
+    if (g_liteState == LITE_SELECTED || g_liteState == LITE_ALREADY ||
+        g_liteState == LITE_NOT_REQUESTED)
+        return;
+    if (g_ffxUpscalerCount == 0 || !g_config) return;
+
+    if (ReadU8Field("Fsr4Model") != 3) {  // FSR4Model::INT8Lite
+        g_liteState = LITE_NOT_REQUESTED;
+        return;
+    }
+
+    int wanted = litesel::PickLiteIndex(g_ffxUpscalerNames, g_ffxUpscalerCount);
+    if (wanted < 0) {
+        if (g_liteState != LITE_NO_ENTRY)
+            LogLine("FSR 4.1.2 Lite wanted, but this game's FFX list (%d entries) has nothing "
+                    "at 4.1.2 or newer; the driver library is not in it", g_ffxUpscalerCount);
+        g_liteState = LITE_NO_ENTRY;
+        return;
+    }
+
+    int current = ReadIntField("FfxUpscalerIndex");
+    if (current >= 0 && current < g_ffxUpscalerCount &&
+        !litesel::Less(litesel::Parse(g_ffxUpscalerNames[current]), litesel::kMinLite)) {
+        g_liteState = LITE_ALREADY;
+        g_liteIndex = current;
+        LogLine("FSR 4.1.2 Lite: index %d (%s) already qualifies", current,
+                g_ffxUpscalerNames[current]);
+        return;
+    }
+
+    LogLine("FSR 4.1.2 Lite: switching FfxUpscalerIndex %d -> %d (%s)", current, wanted,
+            g_ffxUpscalerNames[wanted]);
+    if (!SetFfxUpscalerIndex(wanted)) return;  // g_error says why; try again next pass
+    MarkBackendsChanged();
+    g_liteState = LITE_SELECTED;
+    g_liteIndex = wanted;
+}
+
+/**
  * The rest of what State has to offer, all of which depends on the map above.
  *
  * Kept apart from DiscoverBackendMap because none of it is required for the
@@ -1835,6 +1921,25 @@ static void DiscoverStateExtras() {
                              g_ffxUpscalerNames, &g_ffxUpscalerCount))
             g_ffxUpscalerApi = api;
     }
+    // The Vulkan list gets the driver's FSR 4 appended in a second step, so a list
+    // read before that has nothing new enough in it. While that is the answer,
+    // look at the length again (cheap, and silent -- AdoptFfxVersions logs every
+    // entry) and re-read the whole list when it has grown.
+    if (g_liteState == LITE_NO_ENTRY && g_ffxUpscalerCount > 0) {
+        size_t names = FfxListOffsetForApi(api ? api : g_ffxUpscalerApi);
+        size_t now = 0;
+        if (names && VectorOfStride((const msvc_vector_raw*) ((const unsigned char*) g_backends.table + names),
+                                    sizeof(const char*), &now) && (int) now != g_ffxUpscalerCount) {
+            LogLine("the FFX upscaler list changed (%d -> %lu entries); rereading it",
+                    g_ffxUpscalerCount, (unsigned long) now);
+            g_ffxUpscalerCount = 0;
+            DiscoverStateExtras();
+            return;
+        }
+    }
+    // A different list is a different question, so the answer is asked again.
+    if (g_ffxUpscalerCount == 0) g_liteState = LITE_WAITING;
+    SelectLiteIndex();
 }
 
 /** Poll ticks between status rewrites; the loop sleeps 200ms per tick. */
@@ -1926,7 +2031,16 @@ static DWORD WINAPI Worker(LPVOID) {
         // The FFX version lists appear only once the game has queried the SDK,
         // and the flags need the map, so keep asking as long as any of them is
         // missing. All are cheap the moment they are found.
-        if ((!g_fgFlags.fgChanged || g_ffxFgCount == 0 || g_ffxUpscalerCount == 0)
+        //
+        // The Lite selection is the same kind of thing: it waits for the list,
+        // and a pass that could not write yet (no backend map) has to be tried
+        // again, so it keeps this going until it has an answer. LITE_NO_ENTRY is
+        // not final -- the driver library can still be added to the list when
+        // the game creates its first Vulkan upscaler -- so it keeps asking too,
+        // just as cheaply.
+        const bool liteSettled = g_liteState == LITE_SELECTED || g_liteState == LITE_ALREADY ||
+                                 g_liteState == LITE_NOT_REQUESTED;
+        if ((!g_fgFlags.fgChanged || g_ffxFgCount == 0 || g_ffxUpscalerCount == 0 || !liteSettled)
             && ++rediscoverFg >= 25) {
             rediscoverFg = 0;
             DiscoverStateExtras();

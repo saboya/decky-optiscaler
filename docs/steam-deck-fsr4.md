@@ -16,7 +16,8 @@ commit `b19cfd29`) because 0.9.4 has no setting for the Lite model.
   behalf. Both contain the `FSR4Lite_Int8` provider.
 - Puts them in the game's `OptiScaler/` folder, where OptiScaler 10.x looks for
   them, and writes `Fsr4GpuSupport=4`, `Fsr4Model=3` (INT8 Lite),
-  `UpscalerIndex=0`, `Fsr4EnableWatermark=true`, and the `ffx` / `ffx_12`
+  `UpscalerIndex=0` (the real index is picked in-game, see Vulkan below),
+  `Fsr4EnableWatermark=true`, and the `ffx` / `ffx_12`
   backends: DX12 uses `ffx`, DX11 uses `ffx_12`, and native Vulkan uses `ffx`.
 - The DLLs, the INI and the manifest are written as one unit and rolled back
   together if any step fails. It refuses while the game is running.
@@ -35,16 +36,26 @@ Native Vulkan games differ from DirectX ones in ways that matter here:
   the list that matches `State::api`, and re-reads it if the game's API turns
   out to be different from what it first saw.
 - The Vulkan list *appends* the driver's FSR 4 after the SDK's versions, so
-  `UpscalerIndex=0` is not necessarily it. The right index is only known once
-  the game has queried the list; the panel's FSR version picker shows what the
-  game reports.
+  `UpscalerIndex=0` is an FSR 3 there, and on DX12 the driver's entry is first.
+  The INI keeps `UpscalerIndex=0` and the **in-game plugin picks the index
+  itself**, once the game has reported its list: it takes the highest entry that
+  is 4.1.2 or newer (the first AMD library with INT8 Lite; the SDK's own FSR 4 is
+  4.1.1 and does not have it), switches to it with the same rebuild the panel's
+  FSR version picker uses, and says what it did. It does this only while
+  `Fsr4Model` is INT8 Lite, leaves alone a game whose index already qualifies,
+  and when the list has nothing new enough (the driver library did not load) it
+  reports that and changes nothing, rather than settling for an FSR 4 without the
+  Lite model. The choice is made again every launch, not saved, because it is
+  only right for that game on that API.
 - **No frame rate for native Vulkan.** OptiScaler counts frames in its DXGI
   swapchain wrapper, so with no DXGI swapchain `frameCount` never moves and the
   frame rate reads as unavailable. DXVK and vkd3d-proton games present through
   DXGI and are counted. That is OptiScaler's behaviour, not something this
   plugin can fix.
 
-**Not verified:** that `VulkanUpscaler=ffx` is what makes a Vulkan game load
+**Not verified:** that the in-game selection fires (it has only been run as a
+native unit test of the rule, `asi/test_lite_select.cpp`, not inside a game), and
+that `VulkanUpscaler=ffx` is what makes a Vulkan game load
 `amdvkffx64.dll`. The source says the FFX Vulkan backend initialises the driver
 provider (`FSR4DriverProviderVk`) and looks the DLL up in `OptiDllPath` first, so
 it should; nothing has been run.
